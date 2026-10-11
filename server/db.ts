@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { adminDb } from './firebase-admin.js';
+import { adminDb, hasAdminCredentials } from './firebase-admin.js';
+import { sharedPublicProjects, sharedOwnedProjects, identityContext } from './shared-content.js';
 
 export interface ImageAnalysis {
   summary: string;
@@ -434,10 +435,26 @@ export class FirestoreDatabase {
     return result.docs.map(d => ({ ...d.data(), id: d.id }) as T);
   }
   async getProjects(siteId: string, ownerId: string): Promise<BlogProject[]> {
-    return (await this.getProjectsOnSite(siteId)).filter(p => p.ownerId === ownerId);
+    const stored = this.store !== adminDb || hasAdminCredentials() ? await this.site<BlogProject>(COLLECTIONS.projects, siteId) : [];
+    const shared = this.store === adminDb && siteId === 'hub2' ? await sharedOwnedProjects(ownerId) : [];
+    return [...new Map([...shared, ...stored].filter(p => p.ownerId === ownerId).map(p => [p.id, p])).values()];
   }
-  async getProjectsOnSite(siteId: string) { return this.site<BlogProject>(COLLECTIONS.projects, siteId); }
+  async getProjectsOnSite(siteId: string) {
+    const stored = this.store !== adminDb || hasAdminCredentials() ? await this.site<BlogProject>(COLLECTIONS.projects, siteId) : [];
+    const shared = this.store === adminDb && siteId === 'hub2' ? await sharedPublicProjects() : [];
+    return [...new Map([...shared, ...stored].map(p => [p.id, p])).values()];
+  }
   async getProjectById(id: string) {
+    if (this.store === adminDb) {
+      const shared = (await sharedPublicProjects()).find(p => p.id === id || p.publishedArticleId === id);
+      if (shared) return shared;
+      const owner = identityContext.getStore()?.uid;
+      if (owner) {
+        const owned = (await sharedOwnedProjects(owner)).find(p => p.id === id);
+        if (owned) return owned;
+      }
+      if (!hasAdminCredentials()) return null;
+    }
     const direct = await this.read<BlogProject>(COLLECTIONS.projects, id);
     if (direct) return direct;
     const article = await this.getPublishedArticleById(id);

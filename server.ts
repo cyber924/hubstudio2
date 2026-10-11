@@ -2,7 +2,8 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
-import { adminAuth } from './server/firebase-admin.js';
+import { adminAuth, hasAdminCredentials } from './server/firebase-admin.js';
+import { identityContext, verifyIdentity, sharedPublicImage } from './server/shared-content.js';
 import { waitUntil } from '@vercel/functions';
 import { escapeHtml, scriptJson, stripMetadata, articleBody } from './server/seo.js';
 import { db, HubImage, BlogProject, BlogContent, AgentJob, ChatMessage, AgentThread, ReviewResult, BlogSection, isPublished } from './server/db.js';
@@ -31,9 +32,9 @@ app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
   if (publicRead) return next();
   if (!token) return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: '로그인이 필요합니다.' } });
   try {
-    const user = await adminAuth().verifyIdToken(token);
+    const user = hasAdminCredentials() ? await adminAuth().verifyIdToken(token) : await verifyIdentity(token);
     (req as any).verifiedUser = { uid: user.uid, email: user.email, name: user.name };
-    next();
+    identityContext.run({ uid: user.uid, token }, () => next());
   } catch (error: any) {
     const status = error.status === 503 ? 503 : 401;
     res.status(status).json({ error: { code: status === 503 ? 'CONFIGURATION_REQUIRED' : 'UNAUTHENTICATED', message: status === 503 ? error.message : '로그인이 만료되었거나 유효하지 않습니다.' } });
@@ -100,7 +101,7 @@ app.get('/api/images', async (req: Request, res: Response) => {
 
 // 3. API - Get Image Detail
 app.get('/api/images/:id', async (req: Request, res: Response) => {
-  const img = db.getImageById(req.params.id);
+  const img = db.getImageById(req.params.id) || await sharedPublicImage(req.params.id);
   if (!img || img.visibility !== 'public') {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Image not found' } });
   }
@@ -109,7 +110,7 @@ app.get('/api/images/:id', async (req: Request, res: Response) => {
 
 // 4. API - Public Image HTTP Response
 app.get('/api/images/:id/public', async (req: Request, res: Response) => {
-  const img = db.getImageById(req.params.id);
+  const img = db.getImageById(req.params.id) || await sharedPublicImage(req.params.id);
   if (!img || img.visibility !== 'public') {
     return res.status(404).end();
   }
@@ -869,7 +870,7 @@ async function htmlTemplate(req: Request) {
 
 function imageUrl(id: string) {
   const image = db.getImageById(id);
-  if (!image) return undefined;
+  if (!image) return `${SITE_URL}/api/images/${encodeURIComponent(id)}/public`;
   const url = image.publicUrl || image.thumbnailUrl;
   if (url?.startsWith('data:image/')) return `${SITE_URL}/api/images/${encodeURIComponent(id)}/public`;
   if (!url || (!url.startsWith('/') && !/^https?:\/\//i.test(url))) return undefined;

@@ -27,3 +27,5 @@ function adminApp() {
 
 export const adminDb = () => getFirestore(adminApp());
 export const adminAuth = () => getAuth(adminApp());
+
+export const hasAdminCredentials = () => !!(process.env.FIREBASE_SERVICE_ACCOUNT_JSON || (process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) || process.env.GOOGLE_APPLICATION_CREDENTIALS || process.env.FIRESTORE_EMULATOR_HOST);

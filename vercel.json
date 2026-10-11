@@ -9,13 +9,41 @@
       "includeFiles": "{dist/**,public/**,firestore_images_all.json,server/generated_seeds.json}"
     }
   },
-  "rewrites": [
-    { "source": "/api/:path*", "destination": "/api/index?__route=/api/:path*" },
-    { "source": "/", "destination": "/api/index?__route=/" },
-    { "source": "/webzine", "destination": "/api/index?__route=/webzine" },
-    { "source": "/blog", "destination": "/api/index?__route=/blog" },
-    { "source": "/blog/:id", "destination": "/api/index?__route=/blog/:id" },
-    { "source": "/sitemap.xml", "destination": "/api/index?__route=/sitemap.xml" },
-    { "source": "/robots.txt", "destination": "/api/index?__route=/robots.txt" }
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index?__route=/api/$1"
+    },
+    {
+      "src": "/",
+      "dest": "/api/index?__route=/"
+    },
+    {
+      "src": "/webzine",
+      "dest": "/api/index?__route=/webzine"
+    },
+    {
+      "src": "/blog",
+      "dest": "/api/index?__route=/blog"
+    },
+    {
+      "src": "/blog/([^/]+)",
+      "dest": "/api/index?__route=/blog/$1"
+    },
+    {
+      "src": "/sitemap.xml",
+      "dest": "/api/index?__route=/sitemap.xml"
+    },
+    {
+      "src": "/robots.txt",
+      "dest": "/api/index?__route=/robots.txt"
+    },
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/.*",
+      "dest": "/index.html"
+    }
   ]
 }
