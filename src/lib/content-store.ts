@@ -13,7 +13,12 @@ function normalizeProject(id:string,p:any) {
   return clean({...p,schemaVersion:1,id,siteId:'hub2',title:p.title||raw.title,keyword:p.keyword||'',tone:p.tone||'',audience:p.audience||'',revision:p.revision||1,updatedAt:p.updatedAt||p.createdAt,selectedImageIds:p.selectedImageIds||sections.map((s:any)=>s.imageId).filter(Boolean),content:{title:raw.title||p.title,description:raw.description||raw.metaDescription||raw.summary||'',intro:raw.intro||raw.summary||'',sections,closing:raw.closing||'',faq:raw.faq||[],tags:raw.tags||raw.seoTags||[]},...(p.status==='published'?{publishedArticleId:p.publishedArticleId||id}:{})});
 }
 function owned(p:any) { if(!p||p.ownerId!==user().uid||p.siteId!=='hub2') throw new Error('이 계정의 허브스튜디오2 원고가 아닙니다.'); return p; }
-function failure(error:any):never { if(error?.code==='permission-denied') throw new Error('Firebase 저장 권한이 없습니다. publishedContents·contentProjects에서 로그인 계정의 자기 문서 읽기·쓰기를 허용해야 합니다.'); throw error; }
+function failure(error:any, collectionName:string, operation:string):never {
+  if(error?.code==='permission-denied') {
+    throw Object.assign(new Error(`Firebase ${operation} 권한이 없습니다 (${collectionName}). 로그인과 DB 권한은 별도입니다. Firebase 프로젝트 studio-9240700230-1dd9a의 Firestore 규칙에 이 컬렉션의 본인 문서 권한을 적용해야 합니다.`), {code:'permission-denied',collection:collectionName,operation});
+  }
+  throw error;
+}
 async function listProjects() {
   const uid=user().uid;
   try {
@@ -21,12 +26,14 @@ async function listProjects() {
     return {items:docs.docs.map((d:any)=>normalizeProject(d.id,d.data())).filter(Boolean),warning:null};
   } catch(error:any) {
     if(error.code!=='permission-denied') throw error;
-    const docs: any=await getDocs(query(collection(db,'publishedContents'),where('visibility','==','public')));
+    let docs:any;
+    try { docs=await getDocs(query(collection(db,'publishedContents'),where('visibility','==','public'))); }
+    catch(publicError) { return failure(publicError,'publishedContents','읽기'); }
     return {items:docs.docs.map((d:any)=>normalizeProject(d.id,d.data())).filter((p:any)=>p&&p.ownerId===uid),warning:'내 공개 발행글을 불러왔습니다. 비공개 초안은 현재 읽기 권한이 없어 표시되지 않습니다.'};
   }
 }
 async function loadProject(id:string) {
-  try { const d=await getDoc(doc(db,'publishedContents',id)); if(!d.exists()) throw new Error('원고를 찾을 수 없습니다.'); return owned(normalizeProject(d.id,d.data())); } catch(error) { return failure(error); }
+  try { const d=await getDoc(doc(db,'publishedContents',id)); if(!d.exists()) throw new Error('원고를 찾을 수 없습니다.'); return owned(normalizeProject(d.id,d.data())); } catch(error) { return failure(error,'publishedContents','읽기'); }
 }
 async function saveProject(p:any,expectedRevision?:number,isNew=false) {
   owned(p);
@@ -41,25 +48,25 @@ async function saveProject(p:any,expectedRevision?:number,isNew=false) {
       tx.set(ref,data,{merge:true});
     });
     return data;
-  } catch(error) { return failure(error); }
+  } catch(error) { return failure(error,'publishedContents','저장'); }
 }
 async function publishProject(p:any) {
   if(p.review?.verdict==='hold') throw new Error('검수 보류 상태입니다. 문제를 수정한 뒤 발행하세요.');
   const saved = await saveProject({...p,status:'published',publishedAt:p.publishedAt||new Date().toISOString(),publishedArticleId:p.id},p.revision);
   return saved;
 }
-async function removeProject(id:string) { await loadProject(id); try{await deleteDoc(doc(db,'publishedContents',id));}catch(error){failure(error);} }
+async function removeProject(id:string) { await loadProject(id); try{await deleteDoc(doc(db,'publishedContents',id));}catch(error){failure(error,'publishedContents','삭제');} }
 const threadId=(id:string)=>`hub2_thread_${user().uid}_${id}`;
 async function listThreads() {
   try {
     const result: any=await getDocs(query(collection(db,'contentProjects'),where('ownerId','==',user().uid)));
     return result.docs.filter((d:any)=>d.data().recordType==='hub2Thread'&&d.data().sourceSite==='hub2').map((d:any)=>JSON.parse(d.data().payloadJson)).sort((a:any,b:any)=>b.updatedAt.localeCompare(a.updatedAt));
-  } catch(error) { return failure(error); }
+  } catch(error) { return failure(error,'contentProjects','대화 읽기'); }
 }
 async function loadThread(id:string) { return (await listThreads()).find((t:any)=>t.id===id)||{id,messages:[]}; }
 async function saveThread(id:string,messages:any[],job?:any) {
   const payload=clean({id,ownerId:user().uid,siteId:'hub2',title:messages.find(m=>m.role==='user')?.content?.slice(0,60)||'새 대화',createdAt:messages[0]?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),messages:messages.slice(-50),...(job?{job}:{})});
-  try {await setDoc(doc(db,'contentProjects',threadId(id)),{ownerId:user().uid,sourceSite:'hub2',recordType:'hub2Thread',updatedAt:payload.updatedAt,payloadJson:JSON.stringify(payload)});return payload;}catch(error){return failure(error);}
+  try {await setDoc(doc(db,'contentProjects',threadId(id)),{ownerId:user().uid,sourceSite:'hub2',recordType:'hub2Thread',updatedAt:payload.updatedAt,payloadJson:JSON.stringify(payload)});return payload;}catch(error){return failure(error,'contentProjects','대화 저장');}
 }
   return { user, owned, clean, normalizeProject, listProjects, loadProject, saveProject, publishProject, removeProject, listThreads, loadThread, saveThread };
 }

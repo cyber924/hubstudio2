@@ -19,7 +19,16 @@ test('client writes and publishes one durable original document without an admin
 });
 test('failed client write rejects and does not report success or create a record',async()=>{
  const {d,records}=driver();d.setDoc=async()=>{throw Object.assign(new Error('denied'),{code:'permission-denied'})};
- await assert.rejects(createContentStore(d).saveProject(sample(),undefined,true),/Firebase 저장 권한/);
+ await assert.rejects(createContentStore(d).saveProject(sample(),undefined,true),(error:any)=>error.code==='permission-denied'&&error.collection==='publishedContents'&&error.operation==='저장');
+ assert.equal(records.size,0);
+});
+test('a denied conversation read identifies the read collection, not a failed article save',async()=>{
+ const {d}=driver();d.getDocs=async()=>{throw Object.assign(new Error('denied'),{code:'permission-denied'})};
+ await assert.rejects(createContentStore(d).listThreads(),(error:any)=>error.collection==='contentProjects'&&error.operation==='대화 읽기');
+});
+test('a denied conversation write reports its exact path and does not persist messages',async()=>{
+ const {d,records}=driver();d.setDoc=async()=>{throw Object.assign(new Error('denied'),{code:'permission-denied'})};
+ await assert.rejects(createContentStore(d).saveThread('default_thread',[]),(error:any)=>error.collection==='contentProjects'&&error.operation==='대화 저장');
  assert.equal(records.size,0);
 });
 test('client storage rejects a foreign owner and stale edit revisions',async()=>{
