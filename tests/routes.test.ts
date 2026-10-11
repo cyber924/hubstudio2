@@ -35,6 +35,7 @@ function exchange(url: string, options: RequestInit = {}): Promise<Response> {
     request.method = options.method || 'GET';
     request.headers = Object.fromEntries(new Headers(options.headers).entries());
     request.headers.host = 'localhost';
+    if (options.body) request.headers['content-length'] = String(Buffer.byteLength(String(options.body)));
     const response = new ServerResponse(request);
     const chunks: Buffer[] = [];
     response.write = ((chunk: any) => { chunks.push(Buffer.from(chunk)); return true; }) as any;
@@ -45,7 +46,7 @@ function exchange(url: string, options: RequestInit = {}): Promise<Response> {
       resolve(new Response(Buffer.concat(chunks), { status: response.statusCode, headers }));
       return response;
     }) as any;
-    try { handler(request as any, response as any); request.push(null); } catch (error) { reject(error); }
+    try { handler(request as any, response as any); if (options.body) request.push(String(options.body)); request.push(null); } catch (error) { reject(error); }
   });
 }
 const base = 'http://localhost';
@@ -145,4 +146,20 @@ test('database failures remain errors instead of successful empty results', asyn
     assert.ok((await response.json()).error);
     assert.equal((await request('/sitemap.xml')).status, 503);
   } finally { db.getProjectsOnSite = original; }
+});
+
+test('client-mode generation returns a draft and never calls server persistence',async()=>{
+ const now=Math.floor(Date.now()/1000),encode=(v:any)=>Buffer.from(JSON.stringify(v)).toString('base64url');
+ const token=`${encode({alg:'none',typ:'JWT'})}.${encode({sub:'owner-a',user_id:'owner-a',aud:'studio-9240700230-1dd9a',iss:'https://securetoken.google.com/studio-9240700230-1dd9a',iat:now,exp:now+3600,auth_time:now,firebase:{sign_in_provider:'password'}})}.`;
+ const originalFetch=globalThis.fetch,originalSave=db.saveProject,originalKey=process.env.GEMINI_API_KEY;
+ let writes=0;db.saveProject=async()=>{writes++;throw new Error('server write forbidden')};
+ process.env.GEMINI_API_KEY='test-key';
+ globalThis.fetch=async()=>Response.json({candidates:[{content:{role:'model',parts:[{text:JSON.stringify(fixtures[0].content)}]},finishReason:'STOP'}]});
+ try {
+   const response=await request('/api/blog/generate',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({topic:'클라이언트 저장',imageIds:[],images:[]})});
+   assert.equal(response.status,200);const p=await response.json();assert.equal(p.ownerId,'owner-a');assert.equal(p.status,'draft');assert.equal(writes,0);
+   const foreign=await request('/api/blog/review',{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify({project:{...fixtures[0],ownerId:'owner-b'}})});
+   assert.equal(foreign.status,403);
+   const status=await request('/api/config-status');const config=await status.json();assert.equal(config.storageMode,'firebase-client');assert.equal(config.serverStorageCredentialsRequired,false);
+ } finally {globalThis.fetch=originalFetch;db.saveProject=originalSave;if(originalKey===undefined)delete process.env.GEMINI_API_KEY;else process.env.GEMINI_API_KEY=originalKey;}
 });

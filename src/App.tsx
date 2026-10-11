@@ -35,6 +35,7 @@ import { motion, AnimatePresence } from 'motion/react';
 
 // Import Firebase client auth and firestore SDK
 import { auth as clientAuth, db as clientDb } from './lib/firebase';
+import { clientRequest } from './lib/content-store';
 import { collection, getDocs, query } from 'firebase/firestore';
 import { 
   signInWithEmailAndPassword, 
@@ -344,9 +345,16 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  const authUidRef = useRef<string | null>(null);
   // Auth Listener Setup
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(clientAuth, (user) => {
+      const nextUid = user?.uid || null;
+      if (authUidRef.current !== nextUid) {
+        setProjectsList([]); setMessages([]); setThreads([]); setActiveJob(null);
+        setActiveProject(null); setThreadId('default_thread');
+        authUidRef.current = nextUid;
+      }
       if (user) {
         setCurrentUser({
           uid: user.uid,
@@ -526,35 +534,6 @@ export default function App() {
     }
   }, [currentView, readingArticle]);
 
-  // Poll job status if a job is active
-  useEffect(() => {
-    let intervalId: any;
-    if (activeJob && (activeJob.status === 'queued' || activeJob.status === 'running')) {
-      intervalId = setInterval(async () => {
-        try {
-          const res = await fetchWithAuth(`/api/agent/jobs/${activeJob.id}`);
-          const jobData = await res.json();
-          setActiveJob(jobData);
-          if (jobData.status === 'done' || jobData.status === 'failed' || jobData.status === 'cancelled') {
-            clearInterval(intervalId);
-            // Refresh thread messages
-            loadThreadMessages(threadId);
-            // Refresh projects and articles
-            loadProjects();
-            loadPublicArticles();
-            if (jobData.projectId) {
-              fetchAndLoadProject(jobData.projectId);
-            }
-            showToast(jobData.status === 'done' ? '에이전트가 작업을 무사히 마쳤습니다!' : '작업 중 에러가 발생했습니다.', jobData.status === 'done' ? 'success' : 'error');
-          }
-        } catch (err) {
-          console.error(err);
-        }
-      }, 2000);
-    }
-    return () => clearInterval(intervalId);
-  }, [activeJob]);
-
   const checkedFetch = async (url: string, options: RequestInit = {}) => {
     const response = await fetch(url, options);
     if (!response.headers.get('content-type')?.includes('application/json')) {
@@ -567,12 +546,16 @@ export default function App() {
     return response;
   };
 
-  const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
+  const remoteWithAuth = async (url: string, options: RequestInit = {}) => {
     const user = clientAuth.currentUser;
     if (!user) throw new Error('로그인이 필요합니다.');
     const headers = new Headers(options.headers || {});
     headers.set('Authorization', `Bearer ${await user.getIdToken()}`);
     return checkedFetch(url, { ...options, headers });
+  };
+  const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
+    const metadata = images.map(({id,title,tags,category,analysis,visibility,sourceProject})=>({id,title,tags,category,analysis,visibility,sourceProject}));
+    return clientRequest(url, options, remoteWithAuth, { project: activeProject, images: metadata, messages });
   };
 
   // Loading functions
@@ -694,7 +677,7 @@ export default function App() {
   const loadPublicArticles = async () => {
     setPublicArticlesError(null);
     try {
-      const res = await checkedFetch('/api/blog/public');
+      const res = await checkedFetch('/api/blog/public?fresh=1');
       const data = await res.json();
       setPublicArticles(data.items || []);
     } catch (error: any) {
@@ -722,9 +705,11 @@ export default function App() {
 
   const loadThreads = async () => {
     if (!clientAuth.currentUser) { setThreads([]); return; }
+    const uid = clientAuth.currentUser.uid;
     try {
       const res = await fetchWithAuth('/api/agent/threads');
       const data = await res.json();
+      if (clientAuth.currentUser?.uid !== uid) return;
       setThreads(data.items || []);
       if (data.items && data.items.length > 0) {
         setThreadId(data.items[0].id);
@@ -733,15 +718,16 @@ export default function App() {
         loadThreadMessages('default_thread');
       }
     } catch (e) {
-      console.error(e);
+      showToast(e instanceof Error ? e.message : '대화 보관함 조회 실패', 'error');
     }
   };
 
   const loadThreadMessages = async (tId: string) => {
+    const uid = clientAuth.currentUser?.uid;
     try {
       const res = await fetchWithAuth(`/api/agent/threads/${tId}`);
       const data = await res.json();
-      setMessages(data.items || []);
+      if (clientAuth.currentUser?.uid === uid) setMessages(data.items || []);
     } catch (e) {
       console.error(e);
     }
@@ -984,7 +970,7 @@ export default function App() {
       });
       if (res.ok) {
         const reviewResult = await res.json();
-        setActiveProject({ ...activeProject, review: reviewResult });
+        setActiveProject(reviewResult.project);
         showToast('시각-본문 매치 정합성 검수가 완수되었습니다. 결과를 확인해 보세요.');
       } else {
         showToast('검수 분석 처리 오류', 'error');
@@ -1127,6 +1113,11 @@ export default function App() {
       if (res.ok) {
         const job = await res.json();
         setActiveJob(job);
+        await loadThreadMessages(threadId);
+        await loadProjects();
+        await loadPublicArticles();
+        if (job.projectId) await fetchAndLoadProject(job.projectId);
+        showToast('에이전트 작업과 DB 저장을 완료했습니다.');
       } else {
         showToast('에이전트 태스크 대기열 등록 실패', 'error');
         setActiveJob(null);

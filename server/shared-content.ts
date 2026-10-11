@@ -77,3 +77,12 @@ export async function sharedPublicImage(id: string) {
   if (typeof src !== 'string' || !/^(data:image\/|https:\/\/)/.test(src)) return null;
   return { id, title: f.title || '', visibility: 'public' as const, thumbnailUrl: src, mimeType: f.mimeType || 'image/webp' };
 }
+
+export function invalidateSharedPublicProjects() { cached = undefined; }
+export async function sharedPublicProjectById(id: string) {
+  const response = await fetch(endpoint.replace(':runQuery', `/publishedContents/${encodeURIComponent(id)}`), { signal: AbortSignal.timeout(20000) });
+  if (response.status === 404 || response.status === 403) return null;
+  if (!response.ok) throw Object.assign(new Error('공개 원고 조회 실패'), { status: 503 });
+  const p = sharedProject(await response.json());
+  return p?.visibility === 'public' && p.status === 'published' ? p : null;
+}

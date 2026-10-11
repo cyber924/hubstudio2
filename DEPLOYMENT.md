@@ -1,33 +1,30 @@
-# Hub Studio 2 배포와 원본 데이터 복구
+# HubStudio2: 로그인 계정으로 직접 저장
 
-## 원인
+브라우저의 Firebase Auth + Firestore SDK로 원고를 저장합니다. `FIREBASE_SERVICE_ACCOUNT_JSON`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`는 운영에 필요하지 않습니다. Gemini 키는 Vercel 서버에서만 사용하며 브라우저 번들에 포함하지 않습니다.
 
-기존 Vite 배포는 프론트엔드만 생성하여 `/api/projects`, `/sitemap.xml`, `/robots.txt`가 404였습니다. 원고는 Firestore가 아니라 실행 환경의 `data/db.json`과 메모리에 저장됐습니다. 이 파일은 GitHub에 없습니다. 저장 실패도 로그만 남기므로 발행 성공 표시가 영구 저장을 보장하지 않았습니다.
+## 흐름
 
-## Vercel Production 환경변수
+- 생성·검수·대화 해석: Firebase ID 토큰을 검증한 Vercel API가 Gemini를 호출하고 결과를 반환합니다. 서버는 원고나 작업을 저장하지 않습니다.
+- 초안·수정·발행·삭제: 로그인한 브라우저가 `publishedContents/{원본ID}`를 직접 읽고 저장합니다. ownerId는 현재 Firebase UID, 서비스 표시는 hub2입니다. 발행 시 같은 문서의 status=published, visibility=public로 변경하고 상세 주소는 `/blog/{원본ID}`입니다. 기존 경주·홈다이닝 2개의 ID·소유자를 유지합니다.
+- 수정은 Firestore transaction으로 revision 충돌을 검사합니다. 새 초안은 setDoc로 생성하며, 성공 메시지는 SDK 저장이 완료된 뒤에만 표시합니다.
+- 대화: `contentProjects/hub2_thread_{UID}_{대화ID}`. recordType=hub2Thread, sourceSite=hub2, payloadJson에 최근 50개 메시지와 최종 작업 결과를 저장합니다. 계정마다 대화 ID가 분리됩니다.
+- 에이전트: 브라우저에서 해석→생성/검수/교체/저장/발행을 순차 실행합니다. 자동 발행은 실제 검수 pass일 때만 합니다. 반복 작업 폴링과 서버 백그라운드 저장을 사용하지 않습니다. 실행 중 탭을 닫으면 작업을 계속하지 않습니다. 생성 후 확보된 초안은 후속 단계 실패 시에도 DB에 남습니다.
+- 공개 웹진·초기 HTML·사이트맵은 Firestore REST 공개 조회를 사용합니다. 서버 관리자 인증은 사용하지 않습니다. 발행 후 목록은 fresh 조회하고 상세는 원본 문서를 직접 읽을 수 있습니다.
 
-- `APP_SITE_ID=hub2`
-- `SITE_URL=https://hubstudio2.vercel.app`
-- `APP_URL=https://hubstudio2.vercel.app`
-- `FIREBASE_PROJECT_ID=studio-9240700230-1dd9a`
-- `FIREBASE_SERVICE_ACCOUNT_JSON`: 해당 프로젝트의 서버용 서비스 계정 JSON 전체. **GitHub·채팅·VITE 환경변수에 넣지 않습니다.** 대안은 `FIREBASE_CLIENT_EMAIL` + `FIREBASE_PRIVATE_KEY`입니다.
-- `GEMINI_API_KEY`: 기존 서버용 Gemini 키. 공개 조회·보관함에는 필요하지 않습니다.
-- `GEMINI_TEXT_MODEL`: 해당 키로 실제 사용 가능한 모델 ID.
+## 환경변수
 
-환경변수 설정 후 재배포합니다. 서버는 `api/index.ts`에 연결되고 `dist/index.html`, 공개 이미지 메타데이터가 함수에 포함됩니다. 이미지 외부 URL은 기존 이미지 허브를 사용합니다. 글은 `hub2Projects`, 발행 스냅샷은 `hub2PublishedArticles`, 대화는 `hub2AgentThreads`, 작업은 `hub2AgentJobs`에 저장됩니다. 새 컬렉션의 브라우저 직접 접근은 필요하지 않습니다. 서버는 Firebase ID 토큰과 소유자를 검사합니다. 기존 다른 서비스의 Firestore rules를 덮어쓰지 않습니다.
+- GEMINI_API_KEY: 기존 서버 키
+- GEMINI_TEXT_MODEL: 선택. 기본 gemini-3.8-flash
+- FIREBASE_PROJECT_ID=studio-9240700230-1dd9a
+- APP_SITE_ID=hub2
+- SITE_URL=https://hubstudio2.vercel.app
 
-## 기존 발행물 6개 복구
+환경변수 변경 뒤 Vercel 재배포. `api/index.ts`는 생성·공개 SSR API, `dist`는 브라우저 앱입니다.
 
-AI Studio/기존 실행 환경에서 **원래 `data/db.json`을 먼저 다운로드하고 백업**하세요. 저장소의 이미지 JSON은 글 백업이 아닙니다. 원본 없이 글이 복구됐다고 판단하면 안 됩니다.
+## Firestore 권한
 
-먼저 로컬 환경변수에 서버 인증을 설정하고 아래 명령을 실행합니다.
+기존 공유 DB의 규칙을 통째로 덮어쓰지 않습니다. `publishedContents`와 `contentProjects`에서 로그인 UID의 자기 문서 create/read/update/delete가 허용돼 있어야 합니다. 공개 원고는 visibility=public 문서만 익명 조회를 허용합니다. 업데이트 중 ownerId를 바꿀 수 없어야 합니다. 권한 거절은 화면에 Firebase 저장 권한 오류로 표시하며 샘플·메모리·localStorage 저장으로 대체하지 않습니다.
 
-```sh
-npm run migrate:legacy -- --file /absolute/path/original-db.json --expect-published 6
-```
+## 확인
 
-미리보기 계정 `dev_user` 또는 `guest`가 있으면 소유자를 확인한 뒤 `--legacy-owner-uid 실제_Firebase_UID`를 추가하세요. 검증 출력의 프로젝트 수·발행 수를 확인한 다음 같은 명령에 `--apply`를 추가합니다. 기존 문서를 덮어쓰지 않으며 프로젝트와 발행 스냅샷은 한 배치로 저장됩니다. 원본 파일은 변경하지 않습니다.
-
-## 완료 조건
-
-`npm ci`, `npm run lint`, `npm run build`, `npm test` 성공. 운영 `/api/health` JSON 200, `/api/projects?status=published` 실제 글 6개, 로그인 계정의 보관함·발행·새로고침 확인. 비로그인 보관함 401. 메인·웹진 초기 HTML에 실제 상세 링크, 상세 초기 HTML에 본문과 canonical·BlogPosting, 없는 글 404, 동적 sitemap/robots 200을 확인합니다. 코드 검증은 데이터 복구와 운영 검증을 대신하지 않습니다.
+npm run lint / npm run build / npm test. 로그인 후 초안 생성→보관함→새로고침→수정→발행→비로그인 상세 확인. 내 대화 새로고침 복원 및 다른 계정 격리 확인. `/api/config-status`는 storageMode=firebase-client, serverStorageCredentialsRequired=false여야 합니다. 실제 로그인 쓰기 검증은 로컬 테스트로 대체할 수 없습니다.

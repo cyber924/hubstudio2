@@ -268,7 +268,13 @@ ${currentProjSummary}
       },
       toolArguments: {
         type: Type.OBJECT,
-        description: '해당 도구에 넘겨줄 키-값 매개변수 오브젝트 (없으면 빈 오브젝트)'
+        description: '해당 도구에 넘겨줄 매개변수',
+        properties: {
+          topic: { type: Type.STRING }, tone: { type: Type.STRING },
+          audience: { type: Type.STRING }, keyword: { type: Type.STRING },
+          imageIds: { type: Type.ARRAY, items: { type: Type.STRING } },
+          projectId: { type: Type.STRING }, category: { type: Type.STRING }, tag: { type: Type.STRING }
+        }
       },
       replyText: { type: Type.STRING, description: '사용자에게 보여줄 에이전트의 정성스러운 친절한 답변 메세지' }
     },
