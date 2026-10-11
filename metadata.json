@@ -1,0 +1,6 @@
+{
+  "name": "Hub Studio 2 (허브스튜디오2)",
+  "description": "공통 이미지 자산을 감성적 가치로 큐레이션하여 깊이 있는 여행·생활 콘텐츠를 발행하는 라이프스타일 비주얼 매거진 서비스입니다.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
