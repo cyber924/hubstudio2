@@ -4,9 +4,7 @@ import { BlogContent, BlogProject, HubImage, ReviewResult, BlogSection, ChatMess
 const getAiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY || '';
   if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY' || apiKey === 'MY_GEMINI_API_KEY') {
-    // If no real API key is found, we can warn or throw, but let's be extremely helpful:
-    // we can use a mock/simplified runner if we don't have a valid key, to prevent breaking
-    // in air-gapped environments or local tests, but we'll always try to use the real client first!
+    throw Object.assign(new Error('Gemini 서버 키가 설정되지 않았습니다.'), { status: 503 });
   }
   return new GoogleGenAI({
     apiKey: apiKey,

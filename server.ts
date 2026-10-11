@@ -2,7 +2,10 @@ import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import fs from 'fs';
 import dotenv from 'dotenv';
-import { db, HubImage, BlogProject, BlogContent, AgentJob, ChatMessage, AgentThread, ReviewResult, BlogSection } from './server/db.js';
+import { adminAuth } from './server/firebase-admin.js';
+import { waitUntil } from '@vercel/functions';
+import { escapeHtml, scriptJson, stripMetadata, articleBody } from './server/seo.js';
+import { db, HubImage, BlogProject, BlogContent, AgentJob, ChatMessage, AgentThread, ReviewResult, BlogSection, isPublished } from './server/db.js';
 import { recommendPlan, generateBlog, reviewBlog, rewriteBlog, interpretAgentRequest } from './server/gemini.js';
 
 dotenv.config();
@@ -15,26 +18,43 @@ const siteName = process.env.NEXT_PUBLIC_SITE_NAME || '허브스튜디오2';
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Helper for Mocking Authentication on Server (since Firebase Auth is optional, we will support a user-header or session query param)
-// To keep things super secure and compliant, we extract uid from authorization headers or a default workspace-user id (if no authorization is passed)
-function getVerifiedUser(req: Request) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.substring(7);
-    // In a real app we verify this Firebase ID Token.
-    // For this preview / local build, we extract the claims or default to the user's email ID or token value safely.
-    if (token === 'guest') {
-      return { uid: 'guest', email: 'guest@example.com', name: 'Guest User' };
-    }
-    // Simple token payload extractor for preview testing or safe defaults:
-    return { uid: token, email: `${token}@user.com`, name: `User ${token}` };
+// The client sends an ID token; never trust a UID or a preview identity as authentication.
+function getVerifiedUser(req: Request) { return (req as any).verifiedUser; }
+
+app.use('/api', async (req: Request, res: Response, next: NextFunction) => {
+  const publicRead = req.method === 'GET' && (
+    req.path === '/config-status' || req.path === '/health' ||
+    req.path.startsWith('/images') || req.path.startsWith('/blog/public') ||
+    (req.path === '/projects' && req.query.status === 'published')
+  );
+  const token = req.headers.authorization?.match(/^Bearer (.+)$/)?.[1];
+  if (publicRead) return next();
+  if (!token) return res.status(401).json({ error: { code: 'UNAUTHENTICATED', message: '로그인이 필요합니다.' } });
+  try {
+    const user = await adminAuth().verifyIdToken(token);
+    (req as any).verifiedUser = { uid: user.uid, email: user.email, name: user.name };
+    next();
+  } catch (error: any) {
+    const status = error.status === 503 ? 503 : 401;
+    res.status(status).json({ error: { code: status === 503 ? 'CONFIGURATION_REQUIRED' : 'UNAUTHENTICATED', message: status === 503 ? error.message : '로그인이 만료되었거나 유효하지 않습니다.' } });
   }
-  // Safe default user mock when running in development environment:
-  return { uid: 'dev_user', email: 'sungbaep296@gmail.com', name: 'Sungbae Park' };
+});
+
+app.get('/api/health', (_req, res) => res.json({ ok: true, siteId }));
+
+// Express 4 does not automatically forward rejected async handlers.
+for (const method of ['get', 'post', 'patch', 'delete'] as const) {
+  const register = app[method].bind(app);
+  (app as any)[method] = (route: string, handler: any) => {
+    if (!handler) return register(route);
+    return register(route, (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve().then(() => handler(req, res, next)).catch(next);
+  });
+  };
 }
 
 // 1. API - Config Status
-app.get('/api/config-status', (req: Request, res: Response) => {
+app.get('/api/config-status', async (req: Request, res: Response) => {
   const isGeminiConfigured = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY';
   res.json({
     configured: isGeminiConfigured,
@@ -46,7 +66,7 @@ app.get('/api/config-status', (req: Request, res: Response) => {
 });
 
 // 2. API - Get Images Metadata
-app.get('/api/images', (req: Request, res: Response) => {
+app.get('/api/images', async (req: Request, res: Response) => {
   const limit = parseInt(req.query.limit as string) || 120;
   const cursor = req.query.cursor as string; // Image id to start after
   const tag = req.query.tag as string;
@@ -79,21 +99,26 @@ app.get('/api/images', (req: Request, res: Response) => {
 });
 
 // 3. API - Get Image Detail
-app.get('/api/images/:id', (req: Request, res: Response) => {
+app.get('/api/images/:id', async (req: Request, res: Response) => {
   const img = db.getImageById(req.params.id);
-  if (!img) {
+  if (!img || img.visibility !== 'public') {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Image not found' } });
   }
   res.json(img);
 });
 
 // 4. API - Public Image HTTP Response
-app.get('/api/images/:id/public', (req: Request, res: Response) => {
+app.get('/api/images/:id/public', async (req: Request, res: Response) => {
   const img = db.getImageById(req.params.id);
   if (!img || img.visibility !== 'public') {
     return res.status(404).end();
   }
 
+  if (img.thumbnailUrl.startsWith('data:')) {
+    const match = img.thumbnailUrl.match(/^data:(image\/(?:webp|png|jpeg|gif));base64,([A-Za-z0-9+/=\s]+)$/);
+    if (!match) return res.status(404).end();
+    return res.type(match[1]).set('Cache-Control', 'public, max-age=3600').send(Buffer.from(match[2], 'base64'));
+  }
   // Since we serve seed images locally, we resolve the path
   const localImgPath = path.resolve(path.join('./public', img.thumbnailUrl));
   if (fs.existsSync(localImgPath)) {
@@ -119,7 +144,7 @@ app.post('/api/editorial-plan', async (req: Request, res: Response) => {
     const plan = await recommendPlan(topic, selectedImages);
     res.json(plan);
   } catch (err: any) {
-    res.status(500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Error occurred' } });
+    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Error occurred' } });
   }
 });
 
@@ -160,10 +185,10 @@ app.post('/api/blog/generate', async (req: Request, res: Response) => {
       revision: 1
     };
 
-    db.saveProject(project);
+    (await db.saveProject(project));
     res.json(project);
   } catch (err: any) {
-    res.status(500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Generation failed' } });
+    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Generation failed' } });
   }
 });
 
@@ -173,11 +198,11 @@ app.post('/api/blog/review', async (req: Request, res: Response) => {
     const user = getVerifiedUser(req);
     const { projectId, revision } = req.body;
 
-    const proj = db.getProjectById(projectId);
+    const proj = (await db.getProjectById(projectId));
     if (!proj) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
     }
-    if (proj.ownerId !== user.uid) {
+    if (proj.siteId !== siteId || proj.ownerId !== user.uid) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'You are not the owner of this project' } });
     }
     if (revision !== undefined && proj.revision !== revision) {
@@ -189,11 +214,11 @@ app.post('/api/blog/review', async (req: Request, res: Response) => {
 
     proj.review = reviewResult;
     proj.updatedAt = new Date().toISOString();
-    db.saveProject(proj);
+    (await db.saveProject(proj));
 
     res.json(reviewResult);
   } catch (err: any) {
-    res.status(500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Review failed' } });
+    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Review failed' } });
   }
 });
 
@@ -203,11 +228,11 @@ app.post('/api/blog/replace-images', async (req: Request, res: Response) => {
     const user = getVerifiedUser(req);
     const { projectId, targets, revision } = req.body; // targets can specify explicit sections, or auto-run using project review
 
-    const proj = db.getProjectById(projectId);
+    const proj = (await db.getProjectById(projectId));
     if (!proj) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
     }
-    if (proj.ownerId !== user.uid) {
+    if (proj.siteId !== siteId || proj.ownerId !== user.uid) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Forbidden' } });
     }
     if (revision !== undefined && proj.revision !== revision) {
@@ -252,28 +277,28 @@ app.post('/api/blog/replace-images', async (req: Request, res: Response) => {
     if (replacedCount > 0) {
       proj.revision += 1;
       proj.updatedAt = new Date().toISOString();
-      db.saveProject(proj);
+      (await db.saveProject(proj));
     }
 
     res.json({ success: true, replacedCount, project: proj });
   } catch (err: any) {
-    res.status(500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Replacement failed' } });
+    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Replacement failed' } });
   }
 });
 
 // 9. API - Get Projects List
-app.get('/api/projects', (req: Request, res: Response) => {
+app.get('/api/projects', async (req: Request, res: Response) => {
   const status = req.query.status as 'draft' | 'published' | undefined;
 
   if (status === 'published') {
-    const allProjects = db.getProjectsOnSite(siteId);
-    const publishedList = allProjects.filter(p => p.status === 'published');
+    const allProjects = (await db.getProjectsOnSite(siteId));
+    const publishedList = allProjects.filter(isPublished);
     
     // Deduplicate by original base ID or title to prevent duplicate cloned copies from showing in the Webzine Feed!
     const seen = new Set<string>();
     const deduplicatedList: any[] = [];
     for (const p of publishedList) {
-      const baseId = p.id.split('_')[0] || p.id;
+      const baseId = p.id;
       const title = p.content?.title || p.title || '';
       const key = `${baseId}-${title}`;
       if (!seen.has(key)) {
@@ -282,27 +307,11 @@ app.get('/api/projects', (req: Request, res: Response) => {
       }
     }
     
-    return res.json({ items: deduplicatedList });
+    return res.json({ items: deduplicatedList.map(publicProject) });
   }
 
   const user = getVerifiedUser(req);
-  let list = db.getProjects(siteId, user.uid);
-
-  // If the user has no projects of their own, clone the high-quality seeded projects to their UID!
-  if (list.length === 0) {
-    const devProjects = db.getProjects(siteId, 'dev_user');
-    for (const p of devProjects) {
-      const cloned = {
-        ...p,
-        id: p.id + '_' + user.uid.substring(0, 6), // make unique per user
-        ownerId: user.uid,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      db.saveProject(cloned);
-    }
-    list = db.getProjects(siteId, user.uid);
-  }
+  let list = (await db.getProjects(siteId, user.uid));
 
   if (status) {
     list = list.filter(p => p.status === status);
@@ -312,20 +321,20 @@ app.get('/api/projects', (req: Request, res: Response) => {
 });
 
 // 10. API - Get Project Details
-app.get('/api/projects/:id', (req: Request, res: Response) => {
-  const proj = db.getProjectById(req.params.id);
+app.get('/api/projects/:id', async (req: Request, res: Response) => {
+  const proj = (await db.getProjectById(req.params.id));
 
   if (!proj) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
   }
 
   // Anyone can read a published project (necessary for search crawlers & guest Webzine detail view)
-  if (proj.status === 'published') {
+  if (proj.siteId === siteId && isPublished(proj)) {
     return res.json(proj);
   }
 
   const user = getVerifiedUser(req);
-  if (proj.ownerId !== user.uid) {
+  if (proj.siteId !== siteId || proj.ownerId !== user.uid) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
@@ -333,14 +342,14 @@ app.get('/api/projects/:id', (req: Request, res: Response) => {
 });
 
 // Update Project (Draft update)
-app.patch('/api/projects/:id', (req: Request, res: Response) => {
+app.patch('/api/projects/:id', async (req: Request, res: Response) => {
   const user = getVerifiedUser(req);
-  const proj = db.getProjectById(req.params.id);
+  const proj = (await db.getProjectById(req.params.id));
 
   if (!proj) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
   }
-  if (proj.ownerId !== user.uid) {
+  if (proj.siteId !== siteId || proj.ownerId !== user.uid) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
@@ -353,43 +362,44 @@ app.patch('/api/projects/:id', (req: Request, res: Response) => {
     proj.content = { ...proj.content, ...content };
   }
 
+  const previousRevision = proj.revision;
   proj.revision += 1;
   proj.updatedAt = new Date().toISOString();
-  db.saveProject(proj);
+  await db.saveProject(proj, previousRevision);
 
   res.json(proj);
 });
 
 // Delete Project
-app.delete('/api/projects/:id', (req: Request, res: Response) => {
+app.delete('/api/projects/:id', async (req: Request, res: Response) => {
   const user = getVerifiedUser(req);
-  const proj = db.getProjectById(req.params.id);
+  const proj = (await db.getProjectById(req.params.id));
 
   if (!proj) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
   }
-  if (proj.ownerId !== user.uid) {
+  if (proj.siteId !== siteId || proj.ownerId !== user.uid) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
-  db.deleteProject(req.params.id);
+  (await db.deleteProject(req.params.id));
   // Also delete corresponding published article if exists
   if (proj.publishedArticleId) {
-    db.deletePublishedArticle(proj.publishedArticleId);
+    (await db.deletePublishedArticle(proj.publishedArticleId));
   }
 
   res.json({ success: true });
 });
 
 // 11. API - Publish Project Snapshot
-app.post('/api/projects/:id/publish', (req: Request, res: Response) => {
+app.post('/api/projects/:id/publish', async (req: Request, res: Response) => {
   const user = getVerifiedUser(req);
-  const proj = db.getProjectById(req.params.id);
+  const proj = (await db.getProjectById(req.params.id));
 
   if (!proj) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Project not found' } });
   }
-  if (proj.ownerId !== user.uid) {
+  if (proj.siteId !== siteId || proj.ownerId !== user.uid) {
     return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Forbidden' } });
   }
 
@@ -412,20 +422,21 @@ app.post('/api/projects/:id/publish', (req: Request, res: Response) => {
     publishedAt: new Date().toISOString(),
   };
 
-  db.savePublishedArticle(snapshot);
+  const previousRevision = proj.revision;
 
   proj.status = 'published';
   proj.publishedArticleId = publicationId;
   proj.updatedAt = new Date().toISOString();
   proj.revision += 1;
-  db.saveProject(proj);
+  await db.publishProject(proj, snapshot, previousRevision);
 
   res.json({ success: true, articleId: publicationId, project: proj });
 });
 
 // Get Public Published Article Detail (For Reader mode - SEO optimized)
-app.get('/api/blog/public/:id', (req: Request, res: Response) => {
-  const art = db.getPublishedArticleById(req.params.id);
+app.get('/api/blog/public/:id', async (req: Request, res: Response) => {
+  const project = await db.getProjectById(req.params.id);
+  const art = project && isPublished(project) ? { id: project.publishedArticleId || project.id, projectId: project.id, siteId: project.siteId, content: project.content, title: project.content.title, description: project.content.description, createdAt: project.createdAt, publishedAt: (project as any).publishedAt || project.updatedAt } : null;
   if (!art || art.siteId !== siteId) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Published article not found' } });
   }
@@ -433,14 +444,14 @@ app.get('/api/blog/public/:id', (req: Request, res: Response) => {
 });
 
 // List All Public Published Articles (For Magazine feed)
-app.get('/api/blog/public', (req: Request, res: Response) => {
-  const articles = db.getPublishedArticles(siteId);
+app.get('/api/blog/public', async (req: Request, res: Response) => {
+  const articles = (await db.getPublishedArticles(siteId));
   
   // Deduplicate by base projectId or title to prevent duplicate copies in the bottom feed!
   const seen = new Set<string>();
   const deduplicatedList: any[] = [];
   for (const a of articles) {
-    const baseProjectId = a.projectId ? a.projectId.split('_')[0] : a.id;
+    const baseProjectId = a.projectId || a.id;
     const title = a.title || '';
     const key = `${baseProjectId}-${title}`;
     if (!seen.has(key)) {
@@ -457,7 +468,7 @@ app.get('/api/blog/public', (req: Request, res: Response) => {
 const activeJobs = new Map<string, Promise<void>>();
 
 async function runJobWorkflow(jobId: string) {
-  const job = db.getJobById(jobId);
+  const job = (await db.getJobById(jobId));
   if (!job) return;
 
   try {
@@ -465,14 +476,14 @@ async function runJobWorkflow(jobId: string) {
     job.status = 'running';
     job.stage = 'plan';
     job.updatedAt = new Date().toISOString();
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     // Let's read user message and interpret intention
-    const threadMsgs = db.getMessages(job.threadId);
+    const threadMsgs = (await db.getMessages(job.threadId));
     const availableImages = db.getImages();
     let currentProj: BlogProject | null = null;
     if (job.projectId) {
-      currentProj = db.getProjectById(job.projectId);
+      currentProj = (await db.getProjectById(job.projectId));
     }
 
     const interpretation = await interpretAgentRequest(threadMsgs, availableImages, currentProj);
@@ -485,21 +496,21 @@ async function runJobWorkflow(jobId: string) {
       createdAt: new Date().toISOString(),
       jobId: job.id
     };
-    db.saveMessage(job.threadId, thoughtMsg);
+    (await db.saveMessage(job.threadId, thoughtMsg));
 
     if (interpretation.toolToCall === 'replyOnly' || !interpretation.toolToCall) {
       job.status = 'done';
       job.stage = 'report';
       job.result = { reply: interpretation.replyText };
       job.updatedAt = new Date().toISOString();
-      db.saveJob(job);
+      (await db.saveJob(job));
       return;
     }
 
     // Stage: generate
     job.stage = 'generate';
     job.updatedAt = new Date().toISOString();
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     let proj = currentProj;
     const args = interpretation.toolArguments || {};
@@ -510,7 +521,7 @@ async function runJobWorkflow(jobId: string) {
       job.stage = 'report';
       job.result = { plan };
       job.updatedAt = new Date().toISOString();
-      db.saveJob(job);
+      (await db.saveJob(job));
 
       const planMsg: ChatMessage = {
         id: 'msg_plan_' + Math.random().toString(36).substring(2, 11),
@@ -519,7 +530,7 @@ async function runJobWorkflow(jobId: string) {
         createdAt: new Date().toISOString(),
         jobId: job.id
       };
-      db.saveMessage(job.threadId, planMsg);
+      (await db.saveMessage(job.threadId, planMsg));
       return;
     }
 
@@ -532,7 +543,7 @@ async function runJobWorkflow(jobId: string) {
       job.stage = 'report';
       job.result = { images: imgs.map(i => i.id) };
       job.updatedAt = new Date().toISOString();
-      db.saveJob(job);
+      (await db.saveJob(job));
 
       const imgMsg: ChatMessage = {
         id: 'msg_imgs_' + Math.random().toString(36).substring(2, 11),
@@ -541,7 +552,7 @@ async function runJobWorkflow(jobId: string) {
         createdAt: new Date().toISOString(),
         jobId: job.id
       };
-      db.saveMessage(job.threadId, imgMsg);
+      (await db.saveMessage(job.threadId, imgMsg));
       return;
     }
 
@@ -591,9 +602,9 @@ async function runJobWorkflow(jobId: string) {
         updatedAt: new Date().toISOString(),
         revision: 1
       };
-      db.saveProject(proj);
+      (await db.saveProject(proj));
       job.projectId = proj.id;
-      db.saveJob(job);
+      (await db.saveJob(job));
     }
 
     if (!proj) {
@@ -602,7 +613,7 @@ async function runJobWorkflow(jobId: string) {
 
     // Stage: save (Bypassing review & replace stages to prevent infinite loading)
     job.stage = 'save';
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     const reviewRes = {
       verdict: 'pass' as const,
@@ -612,13 +623,13 @@ async function runJobWorkflow(jobId: string) {
     };
     proj.review = reviewRes;
     proj.updatedAt = new Date().toISOString();
-    db.saveProject(proj);
+    (await db.saveProject(proj));
 
     // Stage: publish (if autoPublish is enabled)
     let publishSnapshotId: string | undefined;
     if (job.autoPublish) {
       job.stage = 'publish';
-      db.saveJob(job);
+      (await db.saveJob(job));
 
       publishSnapshotId = proj.publishedArticleId || 'article_' + Math.random().toString(36).substring(2, 11);
       const snapshot = {
@@ -632,18 +643,18 @@ async function runJobWorkflow(jobId: string) {
         createdAt: proj.createdAt,
         publishedAt: new Date().toISOString(),
       };
-      db.savePublishedArticle(snapshot);
+      const previousRevision = proj.revision;
 
       proj.status = 'published';
       proj.publishedArticleId = publishSnapshotId;
       proj.updatedAt = new Date().toISOString();
       proj.revision += 1;
-      db.saveProject(proj);
+      await db.publishProject(proj, snapshot, previousRevision);
     }
 
     // Stage: verify
     job.stage = 'verify';
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     // Stage: report
     job.stage = 'report';
@@ -654,7 +665,7 @@ async function runJobWorkflow(jobId: string) {
       verdict: reviewRes.verdict,
       replacementsCount: reviewRes.replacements.length,
     };
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     // Compose a gorgeous final report to user
     const reportMarkdown = `### 🌟 에디토리얼 글 생성 완료 보고서
@@ -677,14 +688,14 @@ async function runJobWorkflow(jobId: string) {
       jobId: job.id,
       projectSnapshot: proj
     };
-    db.saveMessage(job.threadId, reportMsg);
+    (await db.saveMessage(job.threadId, reportMsg));
 
   } catch (err: any) {
     console.error('Job execution failed:', err);
     job.status = 'failed';
     job.error = { code: 'SERVER_ERROR', message: err.message || 'Fatal error in workflow', retryable: true };
     job.updatedAt = new Date().toISOString();
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     const errMsg: ChatMessage = {
       id: 'msg_error_' + Math.random().toString(36).substring(2, 11),
@@ -693,7 +704,7 @@ async function runJobWorkflow(jobId: string) {
       createdAt: new Date().toISOString(),
       jobId: job.id
     };
-    db.saveMessage(job.threadId, errMsg);
+    (await db.saveMessage(job.threadId, errMsg));
   }
 }
 
@@ -707,7 +718,11 @@ app.post('/api/agent/jobs', async (req: Request, res: Response) => {
     }
 
     // IDempotency check
-    const existingJob = db.getJobByRequestId(requestId);
+    const requestedProject = projectId ? await db.getProjectById(projectId) : null;
+    if (projectId && (!requestedProject || requestedProject.siteId !== siteId || requestedProject.ownerId !== user.uid)) return res.status(403).json({ error: { message: "Forbidden" } });
+    const existingThread = await db.getThreadById(threadId);
+    if (existingThread && (existingThread.siteId !== siteId || existingThread.ownerId !== user.uid)) return res.status(403).json({ error: { message: "Forbidden" } });
+    const existingJob = (await db.getJobByRequestId(requestId, siteId, user.uid));
     if (existingJob) {
       return res.json(existingJob);
     }
@@ -719,10 +734,10 @@ app.post('/api/agent/jobs', async (req: Request, res: Response) => {
       content: message,
       createdAt: new Date().toISOString()
     };
-    db.saveMessage(threadId, userMsg);
+    (await db.saveMessage(threadId, userMsg));
 
     // Save Thread meta if not exists
-    let thread = db.getThreadById(threadId);
+    let thread = (await db.getThreadById(threadId));
     if (!thread) {
       thread = {
         id: threadId,
@@ -732,7 +747,7 @@ app.post('/api/agent/jobs', async (req: Request, res: Response) => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       };
-      db.saveThread(thread);
+      (await db.saveThread(thread));
     }
 
     const jobId = 'job_' + Math.random().toString(36).substring(2, 11);
@@ -751,24 +766,27 @@ app.post('/api/agent/jobs', async (req: Request, res: Response) => {
       updatedAt: new Date().toISOString()
     };
 
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     // Async run
     const jobPromise = runJobWorkflow(jobId);
+    if (process.env.VERCEL) waitUntil(jobPromise);
     activeJobs.set(jobId, jobPromise);
 
     res.json(job);
   } catch (err: any) {
-    res.status(500).json({ error: { code: 'SERVER_ERROR', message: err.message } });
+    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message } });
   }
 });
 
 // API - Get Job Details
-app.get('/api/agent/jobs/:id', (req: Request, res: Response) => {
-  const job = db.getJobById(req.params.id);
+app.get('/api/agent/jobs/:id', async (req: Request, res: Response) => {
+  const job = (await db.getJobById(req.params.id));
   if (!job) {
     return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
   }
+  const user = getVerifiedUser(req);
+  if (job.siteId !== siteId || job.ownerId !== user.uid) return res.status(403).json({ error: { message: "Forbidden" } });
   res.json(job);
 });
 
@@ -776,11 +794,11 @@ app.get('/api/agent/jobs/:id', (req: Request, res: Response) => {
 app.post('/api/agent/jobs/:id/resume', async (req: Request, res: Response) => {
   try {
     const user = getVerifiedUser(req);
-    const job = db.getJobById(req.params.id);
+    const job = (await db.getJobById(req.params.id));
     if (!job) {
       return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Job not found' } });
     }
-    if (job.ownerId !== user.uid) {
+    if (job.siteId !== siteId || job.ownerId !== user.uid) {
       return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Forbidden' } });
     }
 
@@ -792,22 +810,25 @@ app.post('/api/agent/jobs/:id/resume', async (req: Request, res: Response) => {
     job.status = 'queued';
     job.attemptCount += 1;
     job.updatedAt = new Date().toISOString();
-    db.saveJob(job);
+    (await db.saveJob(job));
 
     const jobPromise = runJobWorkflow(job.id);
+    if (process.env.VERCEL) waitUntil(jobPromise);
     activeJobs.set(job.id, jobPromise);
 
     res.json(job);
   } catch (err: any) {
-    res.status(500).json({ error: { code: 'SERVER_ERROR', message: err.message } });
+    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message } });
   }
 });
 
 // API - Get Thread Messages
-app.get('/api/agent/threads/:id', (req: Request, res: Response) => {
+app.get('/api/agent/threads/:id', async (req: Request, res: Response) => {
   const user = getVerifiedUser(req);
-  const thread = db.getThreadById(req.params.id);
+  const thread = (await db.getThreadById(req.params.id));
   
+  if (thread && (thread.siteId !== siteId || thread.ownerId !== user.uid)) return res.status(403).json({ error: { message: "Forbidden" } });
+
   // Create auto-thread on load if not exists for convenience
   if (!thread) {
     const newThread: AgentThread = {
@@ -818,251 +839,130 @@ app.get('/api/agent/threads/:id', (req: Request, res: Response) => {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
-    db.saveThread(newThread);
+    (await db.saveThread(newThread));
   }
 
-  const msgs = db.getMessages(req.params.id);
+  const msgs = (await db.getMessages(req.params.id));
   res.json({ items: msgs });
 });
 
 // Get User's Threads List
-app.get('/api/agent/threads', (req: Request, res: Response) => {
+app.get('/api/agent/threads', async (req: Request, res: Response) => {
   const user = getVerifiedUser(req);
-  const threads = db.getThreads(siteId, user.uid);
+  const threads = (await db.getThreads(siteId, user.uid));
   res.json({ items: threads });
 });
 
-// Helper to pre-populate HTML with SEO-compliant metadata and JSON-LD
-async function getPopulatedHtml(req: Request, res: Response, statusCode: number, proj: any, viteServer?: any) {
-  const SITE_URL = req.protocol + '://' + req.get('host');
-  let template = '';
-  
-  try {
-    if (viteServer) {
-      template = fs.readFileSync(path.resolve('./index.html'), 'utf-8');
-      template = await viteServer.transformIndexHtml(req.originalUrl, template);
-    } else {
-      template = fs.readFileSync(path.resolve('./dist/index.html'), 'utf-8');
-    }
-  } catch (err) {
-    console.error('Failed to load base template file:', err);
-    return res.status(500).send('Server Error loading template');
-  }
+const SITE_URL = (process.env.SITE_URL || process.env.APP_URL || 'https://hubstudio2.vercel.app').replace(/\/$/, '');
+const publicProject = (p: BlogProject) => ({
+  id: p.id, siteId: p.siteId, title: p.title, status: p.status,
+  content: p.content, createdAt: p.createdAt, updatedAt: p.updatedAt,
+  publishedAt: (p as any).publishedAt || p.updatedAt, publishedArticleId: p.publishedArticleId,
+});
+const articlePath = (p: BlogProject) => `/blog/${encodeURIComponent(p.publishedArticleId || p.id)}`;
 
-  if (statusCode === 404 || !proj) {
-    template = template.replace(/<title>.*?<\/title>/i, `<title>글을 찾을 수 없습니다 | ${siteName}</title>`);
-    
-    const headInsert = `
-  <meta name="robots" content="noindex, follow">
-  <script>window.__SEO_404__ = true;</script>
-`;
-    template = template.replace('</head>', `${headInsert}</head>`);
-
-    const server404Html = `
-<div id="root">
-  <div class="min-h-screen flex flex-col justify-between bg-[#FAF9F6] font-sans">
-    <div class="flex-grow flex flex-col items-center justify-center p-8 text-center max-w-md mx-auto">
-      <svg class="w-16 h-16 text-[#B23B1E] mb-6" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
-      </svg>
-      <h1 class="text-2xl font-serif font-extrabold text-neutral-900 leading-tight mb-2">요청한 글을 찾을 수 없습니다.</h1>
-      <p class="text-neutral-500 text-sm leading-relaxed mb-8">찾으시는 원고가 존재하지 않거나, 비공개 상태로 전환되었습니다.</p>
-      <a href="/" class="px-6 py-3.5 bg-neutral-900 hover:bg-[#B23B1E] text-white text-xs font-semibold rounded-xl transition-all">메인 홈으로 돌아가기</a>
-    </div>
-  </div>
-</div>
-`;
-    template = template.replace(/<div id="root">.*?<\/div>/is, server404Html);
-    res.status(404).set({ 'Content-Type': 'text/html' }).end(template);
-    return;
-  }
-
-  // Populate metadata for 200 OK
-  const postTitle = proj.content?.title || proj.title;
-  const postDescription = proj.content?.description || 'Hub Studio 2에서 창작된 고품질 에디토리얼 아티클입니다.';
-  const canonicalUrl = `${SITE_URL}/blog/${req.params.id}`;
-
-  let postImageUrl = 'https://images.unsplash.com/photo-1542038784456-1ea8e935640e';
-  if (proj.content?.sections) {
-    const firstSecWithImg = proj.content.sections.find((s: any) => s.imageId);
-    if (firstSecWithImg && firstSecWithImg.imageId) {
-      const foundImg = db.getImageById(firstSecWithImg.imageId);
-      if (foundImg) {
-        const thumb = foundImg.thumbnailUrl || foundImg.publicUrl || '';
-        postImageUrl = thumb.startsWith('http') ? thumb : `${SITE_URL}${thumb}`;
-      }
-    }
-  }
-
-  // 1. Dynamic title tag replacement
-  template = template.replace(/<title>.*?<\/title>/i, `<title>${postTitle} | ${siteName}</title>`);
-
-  // 2. Structured BlogPosting JSON-LD & Dynamic Metadata
-  const schemaJsonLd = {
-    "@context": "https://schema.org",
-    "@type": "BlogPosting",
-    "headline": postTitle,
-    "description": postDescription,
-    "image": postImageUrl,
-    "datePublished": proj.createdAt,
-    "dateModified": proj.updatedAt || proj.createdAt,
-    "mainEntityOfPage": {
-      "@type": "WebPage",
-      "@id": canonicalUrl
-    },
-    "author": {
-      "@type": "Organization",
-      "name": siteName
-    },
-    "publisher": {
-      "@type": "Organization",
-      "name": siteName,
-      "url": SITE_URL
-    }
-  };
-
-  const headInsert = `
-  <meta name="description" content="${postDescription}">
-  <link rel="canonical" href="${canonicalUrl}">
-  <meta property="og:type" content="article">
-  <meta property="og:title" content="${postTitle}">
-  <meta property="og:description" content="${postDescription}">
-  <meta property="og:image" content="${postImageUrl}">
-  <meta property="og:url" content="${canonicalUrl}">
-  <meta property="article:published_time" content="${proj.createdAt}">
-  <meta property="article:modified_time" content="${proj.updatedAt || proj.createdAt}">
-  <script type="application/ld+json" id="hub-studio-jsonld">
-  ${JSON.stringify(schemaJsonLd, null, 2)}
-  </script>
-  <script>
-    window.__PRE_RENDERED_PROJECT__ = ${JSON.stringify(proj)};
-    window.__SEO_404__ = false;
-  </script>
-`;
-  template = template.replace('</head>', `${headInsert}</head>`);
-
-  // 3. Complete pre-rendered HTML layout inside #root
-  const serverArticleHtml = `
-<div id="root">
-  <article class="max-w-4xl mx-auto px-6 py-12 font-sans bg-[#FAF9F6]">
-    <h1 class="text-4xl font-serif font-extrabold text-neutral-900 mb-4 leading-tight">${postTitle}</h1>
-    <p class="text-neutral-500 italic mb-8 leading-relaxed">${postDescription}</p>
-    <div class="prose prose-neutral max-w-none text-neutral-800 space-y-6">
-      ${proj.content?.intro ? `<p class="text-lg leading-relaxed font-serif text-neutral-700 bg-neutral-50 p-4 rounded-xl border-l-4 border-[#B23B1E]">${proj.content.intro}</p>` : ''}
-      ${proj.content?.sections ? proj.content.sections.map((s: any) => `
-        <section class="my-10 space-y-3">
-          <h2 class="text-2xl font-serif font-bold text-neutral-900">${s.heading}</h2>
-          <p class="leading-relaxed text-sm">${s.body}</p>
-        </section>
-      `).join('') : ''}
-      ${proj.content?.closing ? `<p class="mt-10 leading-relaxed font-serif text-neutral-700 border-t border-neutral-100 pt-6">${proj.content.closing}</p>` : ''}
-    </div>
-  </article>
-</div>
-`;
-  template = template.replace(/<div id="root">.*?<\/div>/is, serverArticleHtml);
-
-  res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+async function htmlTemplate(req: Request) {
+  const vite = (global as any).viteServerInstance;
+  const template = fs.readFileSync(path.resolve(vite ? './index.html' : './dist/index.html'), 'utf8');
+  return stripMetadata(vite ? await vite.transformIndexHtml(req.originalUrl, template) : template);
 }
 
-// SEO Route - robots.txt
-app.get('/robots.txt', (req: Request, res: Response) => {
-  const SITE_URL = req.protocol + '://' + req.get('host');
-  const robotsTxt = `User-agent: *
-Allow: /
+function imageUrl(id: string) {
+  const image = db.getImageById(id);
+  if (!image) return undefined;
+  const url = image.publicUrl || image.thumbnailUrl;
+  if (url?.startsWith('data:image/')) return `${SITE_URL}/api/images/${encodeURIComponent(id)}/public`;
+  if (!url || (!url.startsWith('/') && !/^https?:\/\//i.test(url))) return undefined;
+  return url.startsWith('http') ? url : `${SITE_URL}${url}`;
+}
 
-Sitemap: ${SITE_URL}/sitemap.xml`;
-  res.header('Content-Type', 'text/plain');
-  res.status(200).send(robotsTxt);
-});
-
-// SEO Route - sitemap.xml
-app.get('/sitemap.xml', (req: Request, res: Response) => {
-  try {
-    const SITE_URL = req.protocol + '://' + req.get('host');
-    const allProjects = db.getProjectsOnSite(siteId);
-    
-    // Filter sitemap.xml to only include fully published posts with a pub time <= now
-    const published = allProjects.filter(p => {
-      if (p.status !== 'published') return false;
-      const pubTime = new Date(p.updatedAt || p.createdAt).getTime();
-      const now = Date.now();
-      if (pubTime > now) return false;
-      return true;
-    });
-
-    // Deduplicate
-    const seen = new Set<string>();
-    const deduplicated: typeof published = [];
-    for (const p of published) {
-      const baseId = p.id.split('_')[0] || p.id;
-      const key = `${baseId}-${p.content?.title || p.title || ''}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        deduplicated.push(p);
-      }
-    }
-
-    const xmlUrls = deduplicated.map(p => {
-      const id = p.publishedArticleId || p.id;
-      const lastModDate = new Date(p.updatedAt || p.createdAt).toISOString();
-      return `  <url>
-    <loc>${SITE_URL}/blog/${id}</loc>
-    <lastmod>${lastModDate}</lastmod>
-    <changefreq>weekly</changefreq>
-    <priority>0.8</priority>
-  </url>`;
-    }).join('\n');
-
-    const sitemapXml = `<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>${SITE_URL}/</loc>
-    <lastmod>${new Date().toISOString().split('T')[0]}</lastmod>
-    <changefreq>daily</changefreq>
-    <priority>1.0</priority>
-  </url>
-${xmlUrls}
-</urlset>`;
-
-    res.header('Content-Type', 'application/xml');
-    res.header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.status(200).send(sitemapXml);
-  } catch (err: any) {
-    res.status(500).send('Sitemap generation failed');
+async function getPopulatedHtml(req: Request, res: Response, statusCode: number, project: BlogProject | null) {
+  let template = await htmlTemplate(req);
+  if (statusCode === 404 || !project) {
+    template = template.replace(/<title>.*?<\/title>/i, '<title>글을 찾을 수 없습니다 | 허브스튜디오2</title>');
+    template = template.replace('</head>', '<meta name="robots" content="noindex,follow"><script>window.__SEO_404__=true;</script></head>');
+    template = template.replace(/<div id="root">\s*<\/div>/, '<div id="root"><h1>글을 찾을 수 없습니다</h1><a href="/webzine">웹진 목록</a></div>');
+    return res.status(404).type('html').send(template);
   }
+  const title = project.content.title || project.title;
+  const description = project.content.description || siteName;
+  const canonical = SITE_URL + articlePath(project);
+  if (req.path !== articlePath(project)) return res.redirect(308, canonical);
+  const firstImage = project.content.sections.find(section => section.imageId)?.imageId;
+  const image = firstImage ? imageUrl(firstImage) : undefined;
+  const publishedAt = (project as any).publishedAt || project.updatedAt || project.createdAt;
+  const schema = {
+    '@context': 'https://schema.org', '@type': 'BlogPosting', headline: title, description,
+    ...(image ? { image: [image] } : {}), datePublished: publishedAt,
+    dateModified: project.updatedAt, mainEntityOfPage: { '@type': 'WebPage', '@id': canonical },
+    author: { '@type': 'Organization', name: siteName },
+    publisher: { '@type': 'Organization', name: siteName, url: SITE_URL },
+  };
+  template = template.replace(/<title>.*?<\/title>/i, `<title>${escapeHtml(title)} | ${escapeHtml(siteName)}</title>`);
+  template = template.replace('</head>', `<meta name="description" content="${escapeHtml(description)}">
+    <link rel="canonical" href="${escapeHtml(canonical)}">
+    <meta property="og:type" content="article"><meta property="og:title" content="${escapeHtml(title)}">
+    <meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${escapeHtml(canonical)}">
+    ${image ? `<meta property="og:image" content="${escapeHtml(image)}">` : ''}
+    <meta property="article:published_time" content="${escapeHtml(publishedAt)}">
+    <meta property="article:modified_time" content="${escapeHtml(project.updatedAt)}">
+    <script type="application/ld+json" id="hub-studio-jsonld">${scriptJson(schema)}</script>
+    <script>window.__PRE_RENDERED_PROJECT__=${scriptJson(publicProject(project))};window.__SEO_404__=false;</script></head>`);
+  template = template.replace(/<div id="root">\s*<\/div>/, `<div id="root">${articleBody(project, imageUrl)}</div>`);
+  res.status(200).type('html').send(template);
+}
+
+app.get('/robots.txt', (_req: Request, res: Response) => {
+  res.type('text/plain').send(`User-agent: *\nAllow: /\nDisallow: /api/agent/\nDisallow: /api/projects\n\nSitemap: ${SITE_URL}/sitemap.xml\n`);
 });
 
-// SEO Route - blog detail canonical SSR page
+app.get('/sitemap.xml', async (_req: Request, res: Response) => {
+  const projects = (await db.getProjectsOnSite(siteId)).filter(isPublished);
+  const pages = ['/', '/webzine', '/blog'].map(path => `<url><loc>${escapeHtml(SITE_URL + path)}</loc></url>`);
+  for (const project of projects) {
+    pages.push(`<url><loc>${escapeHtml(SITE_URL + articlePath(project))}</loc><lastmod>${escapeHtml(project.updatedAt)}</lastmod></url>`);
+  }
+  res.set('Cache-Control', 'no-store').type('application/xml').send(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${pages.join('')}</urlset>`);
+});
+
 app.get('/blog/:id', async (req: Request, res: Response) => {
-  const { id } = req.params;
-  
-  let proj = db.getProjectById(id);
-  if (!proj) {
-    const publishedArt = db.getPublishedArticleById(id);
-    if (publishedArt && publishedArt.projectId) {
-      proj = db.getProjectById(publishedArt.projectId);
-    } else {
-      proj = db.getProjectsOnSite(siteId).find(p => p.publishedArticleId === id || p.id === id) || null;
-    }
-  }
+  const project = await db.getProjectById(req.params.id);
+  return getPopulatedHtml(req, res, project && project.siteId === siteId && isPublished(project) ? 200 : 404, project && project.siteId === siteId && isPublished(project) ? project : null);
+});
 
-  if (!proj || proj.status !== 'published') {
-    return getPopulatedHtml(req, res, 404, null, (global as any).viteServerInstance);
-  }
+for (const route of ['/', '/webzine', '/blog']) app.get(route, async (req: Request, res: Response) => {
+  const projects = (await db.getProjectsOnSite(siteId)).filter(isPublished);
+  const title = req.path === '/' ? `${siteName} | 라이프스타일 비주얼 매거진` : `공식 웹진 아카이브 | ${siteName}`;
+  const description = '여행과 생활의 이야기를 이미지와 함께 전하는 라이프스타일 웹진입니다.';
+  let template = await htmlTemplate(req);
+  template = template.replace(/<title>.*?<\/title>/i, `<title>${escapeHtml(title)}</title>`);
+  template = template.replace('</head>', `<meta name="description" content="${escapeHtml(description)}"><link rel="canonical" href="${SITE_URL + req.path}">
+    <meta property="og:type" content="website"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}"><meta property="og:url" content="${SITE_URL + req.path}">
+    <script>window.__PUBLIC_PROJECTS__=${scriptJson(projects.map(publicProject))};</script></head>`);
+  const cards = projects.map(project => {
+    const section = project.content.sections.find(section => section.imageId);
+    const image = section?.imageId ? imageUrl(section.imageId) : undefined;
+    return `<article class="bg-white rounded-2xl overflow-hidden border border-neutral-200"><a href="${articlePath(project)}">
+      ${image ? `<img class="w-full aspect-video object-cover" src="${escapeHtml(image)}" alt="${escapeHtml(section?.alt || project.content.title)}" loading="lazy">` : ''}
+      <div class="p-6"><h2 class="text-xl font-bold">${escapeHtml(project.content.title || project.title)}</h2><p class="mt-3 text-neutral-500">${escapeHtml(project.content.description)}</p></div></a></article>`;
+  }).join('');
+  const body = `<main class="max-w-7xl mx-auto px-6 py-12"><nav><a href="/">${escapeHtml(siteName)}</a> · <a href="/webzine">웹진</a></nav><h1 class="text-3xl font-bold my-8">${escapeHtml(title)}</h1><p class="mb-8">${escapeHtml(description)}</p><section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">${cards || '<p>발행된 글이 없습니다.</p>'}</section></main>`;
+  template = template.replace(/<div id="root">\s*<\/div>/, `<div id="root">${body}</div>`);
+  res.status(200).type('html').send(template);
+});
 
-  const pubTime = new Date(proj.updatedAt || proj.createdAt).getTime();
-  if (pubTime > Date.now()) {
-    return getPopulatedHtml(req, res, 404, null, (global as any).viteServerInstance);
-  }
-
-  return getPopulatedHtml(req, res, 200, proj, (global as any).viteServerInstance);
+app.use('/api', (_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'API not found' } }));
+app.use((error: any, req: Request, res: Response, _next: NextFunction) => {
+  console.error('Request failed', req.path, error.code || error.message);
+  const status = error.status || 503;
+  if (req.path.startsWith('/api/')) return res.status(status).json({ error: { code: 'DATA_UNAVAILABLE', message: '데이터를 불러오거나 저장하지 못했습니다. 서버 설정을 확인하고 다시 시도하세요.' } });
+  res.status(status).type('text/plain').send('서비스 데이터를 불러오지 못했습니다. 잠시 후 다시 시도하세요.');
 });
 
 // Dynamic mounting of Vite development server OR serving static files in production!
 const isProduction = process.env.NODE_ENV === 'production' || fs.existsSync(path.resolve('./dist'));
 
-if (!isProduction) {
+if (!isProduction && !process.env.VERCEL) {
   console.log('Running in DEVELOPMENT mode with Vite dev middleware...');
   import('vite').then((vite) => {
     vite.createServer({
@@ -1089,11 +989,13 @@ if (!isProduction) {
 } else {
   console.log('Running in PRODUCTION mode serving compiled build assets...');
   app.use(express.static(path.resolve('./dist'), { index: false }));
-  app.use('*', (req: Request, res: Response) => {
+  app.use('*', async (req: Request, res: Response) => {
     res.sendFile(path.resolve('./dist/index.html'));
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
+if (!process.env.VERCEL) app.listen(PORT, '0.0.0.0', () => {
   console.log(`Hub Studio 2 full-stack server running perfectly at http://localhost:${PORT}`);
 });
+
+export default app;

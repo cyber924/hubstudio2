@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { adminDb } from './firebase-admin.js';
 
 export interface ImageAnalysis {
   summary: string;
@@ -131,9 +132,6 @@ export interface AgentThread {
   createdAt: string;
   updatedAt: string;
 }
-
-const DATA_DIR = path.resolve('./data');
-const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 interface Schema {
   images: HubImage[];
@@ -411,335 +409,95 @@ const OLD_SEED_IMAGES: any[] = [
   }
 ];
 
-class FileDatabase {
-  private memoryDb: Schema = {
-    images: [],
-    projects: [],
-    jobs: [],
-    threads: [],
-    messages: {},
-    publishedArticles: [],
-  };
+// Read-only image metadata remains bundled; user content is always durable Firestore data.
+export const COLLECTIONS = {
+  projects: 'hub2Projects', articles: 'hub2PublishedArticles',
+  jobs: 'hub2AgentJobs', threads: 'hub2AgentThreads',
+};
 
-  constructor() {
-    this.init();
-  }
-
-  private init() {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-
-    if (fs.existsSync(DB_FILE)) {
-      try {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        this.memoryDb = {
-          images: parsed.images || [],
-          projects: parsed.projects || [],
-          jobs: parsed.jobs || [],
-          threads: parsed.threads || [],
-          messages: parsed.messages || {},
-          publishedArticles: parsed.publishedArticles || [],
-        };
-      } catch (err) {
-        console.error('Failed to parse db.json, resetting database file.', err);
-        this.memoryDb = {
-          images: [...SEED_IMAGES],
-          projects: [],
-          jobs: [],
-          threads: [],
-          messages: {},
-          publishedArticles: [],
-        };
-        this.save();
-      }
-    } else {
-      this.memoryDb = {
-        images: [...SEED_IMAGES],
-        projects: [],
-        jobs: [],
-        threads: [],
-        messages: {},
-        publishedArticles: [],
-      };
-      this.save();
-    }
-
-    // Ensure we always have seed images and reset to real images from firestore_images_all.json
-    this.memoryDb.images = [...SEED_IMAGES];
-    this.save();
-
-    // Ensure we always have some draft projects seeded so they do not show empty if they had drafts before
-    if (this.memoryDb.projects.length === 0) {
-      const projId1 = 'proj_jeju_draft';
-      const projId2 = 'proj_golf_draft';
-      this.memoryDb.projects = [
-        {
-          schemaVersion: 1,
-          id: projId1,
-          siteId: 'hub2',
-          ownerId: 'dev_user',
-          title: '푸른 바람을 머금은 제주, 온 가족이 함께 걷는 성산일출봉 해변',
-          keyword: '제주도 가족여행',
-          tone: '차분하고 감성적인 에세이 어조',
-          audience: '감성 라이프스타일 독자층',
-          status: 'published',
-          visibility: 'private',
-          selectedImageIds: ['img_7iLRc6oD_1789876355881', 'img_7iLRc6oD_1789876428855'],
-          createdAt: new Date(Date.now() - 3600000).toISOString(),
-          updatedAt: new Date().toISOString(),
-          revision: 1,
-          content: {
-            title: '푸른 바람을 머금은 제주, 온 가족이 함께 걷는 성산일출봉 해변',
-            description: '온 가족이 함께 떠난 제주도 1박 2일 여행 기록. 성산일출봉과 해변의 아늑한 아침 공기 속 힐링 여정.',
-            intro: '때로는 일상에서 벗어나 파도 소리에 귀를 기울이는 것만으로도 충분한 위로가 됩니다. 에메랄드빛 바다가 감싸 안은 제주의 바람 속으로 온 가족이 함께 발걸음을 옮겼습니다.',
-            sections: [
-              {
-                id: 'sec_1',
-                heading: '성산일출봉을 배경으로 펼쳐진 아침 바다',
-                body: '이른 아침의 공기는 살짝 알싸하지만 가슴 속을 맑은 생동감으로 채워줍니다. 저 멀리 성산일출봉이 든든한 실루엣으로 서 있고, 밀려오는 파도는 은은한 햇살을 받아 반짝입니다. 아이의 고사리 같은 손을 잡고 해변을 걷는 부모의 뒷모습에는 어떤 말보다 깊은 평온함이 고여 있습니다.',
-                imageId: 'img_7iLRc6oD_1789876355881',
-                caption: '바다와 마주하는 아침, 제주 성산일출봉 해안가',
-                alt: '성산일출봉 해변을 걷는 가족'
-              },
-              {
-                id: 'sec_2',
-                heading: '바람이 드레스를 흔드는 고요한 해변에서',
-                body: '모래사장 위로 부드러운 바람이 스쳐 지나가며 자연스러운 리듬을 만듭니다. 바람에 흩날리는 롱 드레스를 여미며 해변을 가만히 내려다보는 순간, 자연과 인간이 하나가 된 듯한 예술적인 구도가 흐릅니다. 바다가 전해주는 위로와 여백은 우리의 일상을 다시 한번 풍요롭게 다듬어 줍니다.',
-                imageId: 'img_7iLRc6oD_1789876428855',
-                caption: '해질녘 모래사장 위에서 마주하는 자연스러운 바람',
-                alt: '해변에서 생각에 잠긴 모델 여성'
-              }
-            ],
-            closing: '여정은 끝나도 기억 속 제주의 푸른 파도는 오래도록 마음속에서 찰랑일 것입니다. 가족과 함께 걸었던 이 모래사장의 추억은 삶의 든든한 에너지가 되어 주겠지요.',
-            faq: [
-              { question: '제주도 1박 2일 가족 코스로 성산일출봉은 어떨까요?', answer: '경사가 완만하고 경치가 훌륭해 부모님이나 아이 동반으로 해변 산책로를 걷기 아주 좋습니다.' },
-              { question: '사진 촬영하기 좋은 최적의 시간대는 언제인가요?', answer: '오전 8~10시 사이의 사광(자연광)이 들어오는 아침 시간대가 가장 맑고 입체적인 톤으로 촬영됩니다.' }
-            ],
-            tags: ['제주여행', '가족여행', '힐링에세이', '성산일출봉']
-          }
-        },
-        {
-          schemaVersion: 1,
-          id: projId2,
-          siteId: 'hub2',
-          ownerId: 'dev_user',
-          title: '초록빛 필드 위에서 나누는 정다운 교감, 파크골프의 매력',
-          keyword: '파크골프 라이프스타일',
-          tone: '차분하고 감성적인 에세이 어조',
-          audience: '감성 라이프스타일 독자층',
-          status: 'published',
-          visibility: 'private',
-          selectedImageIds: ['img_7iLRc6oD_1789876484663', 'img_7iLRc6oD_1789876529414'],
-          createdAt: new Date(Date.now() - 7200000).toISOString(),
-          updatedAt: new Date().toISOString(),
-          revision: 1,
-          content: {
-            title: '초록빛 필드 위에서 나누는 정다운 교감, 파크골프의 매력',
-            description: '소박하고 건강하게 즐기는 잔디 위 활기찬 파크골프 라이프스타일 에세이.',
-            intro: '바쁘게 굴러가는 도시를 조금만 비껴나면, 잔디 냄새 가득한 초록빛 공간을 만날 수 있습니다. 무겁지 않은 채 하나를 쥐고 사랑하는 이와 정답게 대화를 나누며 걷는 파크골프는 단순한 스포츠 이상의 즐거움을 줍니다.',
-            sections: [
-              {
-                id: 'sec_1',
-                heading: '부드러운 스윙, 잔디밭에서 가볍게 굴러가는 주홍빛 골프공',
-                body: '파크골프의 매력은 가벼움에 있습니다. 맑은 가을날, 부드럽게 잔디를 스치며 주홍빛 공이 굴러갈 때의 경쾌한 소리는 가슴 속 깊은 체증을 쓸어내려 줍니다. 시니어들뿐만 아니라 모든 세대가 부담 없이 소통하기에 가장 알맞은 친화적인 게임입니다.',
-                imageId: 'img_7iLRc6oD_1789876484663',
-                caption: '필드 잔디 위에 경쾌하게 멈춰 선 주홍빛 파크골프공',
-                alt: '파크골프공 스윙 전경'
-              },
-              {
-                id: 'sec_2',
-                heading: '노부부의 해사한 미소, 정겨운 하이파이브',
-                body: '서로의 자세를 다정하게 봐주고 퍼팅이 깔끔하게 성공할 때마다 환한 미소를 지으며 손을 맞부딪히는 노부부의 모습만큼 아름다운 전경이 또 있을까요? 넓은 하늘 아래, 건강한 걸음을 이어가며 건강과 사랑을 동시에 돌보는 슬기로운 삶의 방식입니다.',
-                imageId: 'img_7iLRc6oD_1789876529414',
-                caption: '서로를 바라보며 잔잔하게 미소 짓는 노부부의 필드 위 힐링 모먼트',
-                alt: '골프를 치며 미소 짓는 부부'
-              }
-            ],
-            closing: '주말 오후의 따스한 햇살 속에서 흘린 은근한 땀방울이 온몸의 에너지를 깨워줍니다. 가볍게 어깨동무를 하고 정겨운 대화를 건네며 집으로 돌아가는 길은 무척 가볍습니다.',
-            faq: [
-              { question: '일반 골프와 파크골프의 가장 큰 차이점은 무엇인가요?', answer: '파크골프는 하나의 클럽과 플라스틱 공을 사용하여 공원처럼 가까운 전용 소규모 야외 경기장에서 아주 가볍게 진행되는 점이 다릅니다.' },
-              { question: '가족 삼대(3대)가 함께 참여할 수도 있나요?', answer: '장비 조작법이 매우 안전하고 부상 위험이 극히 낮아, 어린아이부터 조부모까지 누구나 즉시 함께 즐길 수 있습니다.' }
-            ],
-            tags: ['파크골프', '건강수명', '가을산책', '시니어라이프']
-          }
-        }
-      ];
-      this.save();
-    }
-
-    // Ensure we always have corresponding published articles seeded for the published projects
-    const publishedProjects = this.memoryDb.projects.filter(p => p.status === 'published');
-    for (const proj of publishedProjects) {
-      const exists = this.memoryDb.publishedArticles.some(a => a.projectId === proj.id);
-      if (!exists) {
-        const publicationId = proj.publishedArticleId || 'article_' + Math.random().toString(36).substring(2, 11);
-        proj.publishedArticleId = publicationId;
-        const snapshot = {
-          id: publicationId,
-          siteId: proj.siteId,
-          ownerId: proj.ownerId,
-          projectId: proj.id,
-          title: proj.content.title,
-          description: proj.content.description,
-          content: proj.content,
-          createdAt: proj.createdAt,
-          publishedAt: proj.updatedAt || new Date().toISOString(),
-        };
-        this.memoryDb.publishedArticles.push(snapshot);
-      }
-    }
-    this.save();
-  }
-
-  private save() {
-    try {
-      const tempPath = DB_FILE + '.tmp';
-      fs.writeFileSync(tempPath, JSON.stringify(this.memoryDb, null, 2), 'utf-8');
-      fs.renameSync(tempPath, DB_FILE);
-    } catch (err) {
-      console.error('Failed to write db.json atomically:', err);
-    }
-  }
-
-  // IMAGE Operations
-  public getImages(): HubImage[] {
-    const unique: HubImage[] = [];
-    const seen = new Set<string>();
-    for (const img of this.memoryDb.images) {
-      if (img && img.id && !seen.has(img.id)) {
-        seen.add(img.id);
-        unique.push(img);
-      }
-    }
-    return unique;
-  }
-
-  public getImageById(id: string): HubImage | null {
-    return this.memoryDb.images.find(img => img.id === id) || null;
-  }
-
-  public saveImage(img: HubImage) {
-    const idx = this.memoryDb.images.findIndex(i => i.id === img.id);
-    if (idx >= 0) {
-      this.memoryDb.images[idx] = img;
-    } else {
-      this.memoryDb.images.push(img);
-    }
-    this.save();
-  }
-
-  // PROJECT Operations
-  public getProjects(siteId: string, ownerId: string): BlogProject[] {
-    return this.memoryDb.projects.filter(p => p.siteId === siteId && p.ownerId === ownerId);
-  }
-
-  public getProjectsOnSite(siteId: string): BlogProject[] {
-    return this.memoryDb.projects.filter(p => p.siteId === siteId);
-  }
-
-  public getProjectById(id: string): BlogProject | null {
-    return this.memoryDb.projects.find(p => p.id === id) || null;
-  }
-
-  public saveProject(proj: BlogProject) {
-    const idx = this.memoryDb.projects.findIndex(p => p.id === proj.id);
-    if (idx >= 0) {
-      this.memoryDb.projects[idx] = proj;
-    } else {
-      this.memoryDb.projects.push(proj);
-    }
-    this.save();
-  }
-
-  public deleteProject(id: string) {
-    this.memoryDb.projects = this.memoryDb.projects.filter(p => p.id !== id);
-    this.save();
-  }
-
-  // JOB Operations
-  public getJobs(siteId: string, ownerId: string): AgentJob[] {
-    return this.memoryDb.jobs.filter(j => j.siteId === siteId && j.ownerId === ownerId);
-  }
-
-  public getJobById(id: string): AgentJob | null {
-    return this.memoryDb.jobs.find(j => j.id === id) || null;
-  }
-
-  public getJobByRequestId(requestId: string): AgentJob | null {
-    return this.memoryDb.jobs.find(j => j.requestId === requestId) || null;
-  }
-
-  public saveJob(job: AgentJob) {
-    const idx = this.memoryDb.jobs.findIndex(j => j.id === job.id);
-    if (idx >= 0) {
-      this.memoryDb.jobs[idx] = job;
-    } else {
-      this.memoryDb.jobs.push(job);
-    }
-    this.save();
-  }
-
-  // THREAD & MESSAGE Operations
-  public getThreads(siteId: string, ownerId: string): AgentThread[] {
-    return this.memoryDb.threads.filter(t => t.siteId === siteId && t.ownerId === ownerId);
-  }
-
-  public getThreadById(id: string): AgentThread | null {
-    return this.memoryDb.threads.find(t => t.id === id) || null;
-  }
-
-  public saveThread(thread: AgentThread) {
-    const idx = this.memoryDb.threads.findIndex(t => t.id === thread.id);
-    if (idx >= 0) {
-      this.memoryDb.threads[idx] = thread;
-    } else {
-      this.memoryDb.threads.push(thread);
-    }
-    this.save();
-  }
-
-  public getMessages(threadId: string): ChatMessage[] {
-    return this.memoryDb.messages[threadId] || [];
-  }
-
-  public saveMessage(threadId: string, msg: ChatMessage) {
-    if (!this.memoryDb.messages[threadId]) {
-      this.memoryDb.messages[threadId] = [];
-    }
-    const idx = this.memoryDb.messages[threadId].findIndex(m => m.id === msg.id);
-    if (idx >= 0) {
-      this.memoryDb.messages[threadId][idx] = msg;
-    } else {
-      this.memoryDb.messages[threadId].push(msg);
-    }
-    this.save();
-  }
-
-  // PUBLISHED ARTICLES Operations
-  public getPublishedArticles(siteId: string): any[] {
-    return this.memoryDb.publishedArticles.filter(a => a.siteId === siteId);
-  }
-
-  public getPublishedArticleById(id: string): any | null {
-    return this.memoryDb.publishedArticles.find(a => a.id === id) || null;
-  }
-
-  public savePublishedArticle(art: any) {
-    const idx = this.memoryDb.publishedArticles.findIndex(a => a.id === art.id);
-    if (idx >= 0) {
-      this.memoryDb.publishedArticles[idx] = art;
-    } else {
-      this.memoryDb.publishedArticles.push(art);
-    }
-    this.save();
-  }
-
-  public deletePublishedArticle(id: string) {
-    this.memoryDb.publishedArticles = this.memoryDb.publishedArticles.filter(a => a.id !== id);
-    this.save();
-  }
+export function isPublished(project: BlogProject) {
+  const time = Date.parse((project as any).publishedAt || project.updatedAt || project.createdAt);
+  return project.status === 'published' && Number.isFinite(time) && time <= Date.now();
 }
 
-export const db = new FileDatabase();
+export class FirestoreDatabase {
+  constructor(private store = adminDb) {}
+  getImages(): HubImage[] { return [...new Map(SEED_IMAGES.map(i => [i.id, i])).values()]; }
+  getImageById(id: string): HubImage | null { return this.getImages().find(i => i.id === id || i.id === id.replace(/^img_/, '')) || null; }
+  async saveImage(img: HubImage) { await this.store().collection('images').doc(img.id).set(img); }
+  private async read<T>(collection: string, id: string): Promise<T | null> {
+    const document = await this.store().collection(collection).doc(id).get();
+    return document.exists ? { ...document.data(), id: document.id } as T : null;
+  }
+  private async site<T>(collection: string, siteId: string): Promise<T[]> {
+    const result = await this.store().collection(collection).where('siteId', '==', siteId).get();
+    return result.docs.map(d => ({ ...d.data(), id: d.id }) as T);
+  }
+  async getProjects(siteId: string, ownerId: string): Promise<BlogProject[]> {
+    return (await this.getProjectsOnSite(siteId)).filter(p => p.ownerId === ownerId);
+  }
+  async getProjectsOnSite(siteId: string) { return this.site<BlogProject>(COLLECTIONS.projects, siteId); }
+  async getProjectById(id: string) {
+    const direct = await this.read<BlogProject>(COLLECTIONS.projects, id);
+    if (direct) return direct;
+    const article = await this.getPublishedArticleById(id);
+    return article?.projectId ? this.read<BlogProject>(COLLECTIONS.projects, article.projectId) : null;
+  }
+  async saveProject(project: BlogProject, expectedRevision?: number) {
+    const ref = this.store().collection(COLLECTIONS.projects).doc(project.id);
+    await this.store().runTransaction(async tx => {
+      const current = await tx.get(ref);
+      if (current.exists && expectedRevision !== undefined && current.data()?.revision !== expectedRevision) {
+        throw Object.assign(new Error('다른 변경이 저장되었습니다. 새로고침 후 다시 시도하세요.'), { status: 409 });
+      }
+      tx.set(ref, project);
+    });
+  }
+  async publishProject(project: BlogProject, article: any, expectedRevision: number) {
+    const ref = this.store().collection(COLLECTIONS.projects).doc(project.id);
+    await this.store().runTransaction(async tx => {
+      const current = await tx.get(ref);
+      if (!current.exists || current.data()?.revision !== expectedRevision) {
+        throw Object.assign(new Error('발행 충돌: 새로고침 후 다시 시도하세요.'), { status: 409 });
+      }
+      tx.set(ref, { ...project, visibility: 'public', publishedAt: article.publishedAt });
+      tx.set(this.store().collection(COLLECTIONS.articles).doc(article.id), article);
+    });
+  }
+  async deleteProject(id: string) {
+    const project = await this.getProjectById(id);
+    const batch = this.store().batch();
+    batch.delete(this.store().collection(COLLECTIONS.projects).doc(id));
+    if (project?.publishedArticleId) batch.delete(this.store().collection(COLLECTIONS.articles).doc(project.publishedArticleId));
+    await batch.commit();
+  }
+  async getJobs(siteId: string, ownerId: string) { return (await this.site<AgentJob>(COLLECTIONS.jobs, siteId)).filter(j => j.ownerId === ownerId); }
+  async getJobById(id: string) { return this.read<AgentJob>(COLLECTIONS.jobs, id); }
+  async getJobByRequestId(requestId: string, siteId: string, ownerId: string) {
+    return (await this.getJobs(siteId, ownerId)).find(j => j.requestId === requestId) || null;
+  }
+  async saveJob(job: AgentJob) { await this.store().collection(COLLECTIONS.jobs).doc(job.id).set(job); }
+  async getThreads(siteId: string, ownerId: string) { return (await this.site<AgentThread>(COLLECTIONS.threads, siteId)).filter(t => t.ownerId === ownerId); }
+  async getThreadById(id: string) { return this.read<AgentThread>(COLLECTIONS.threads, id); }
+  async saveThread(thread: AgentThread) { await this.store().collection(COLLECTIONS.threads).doc(thread.id).set(thread); }
+  async getMessages(threadId: string): Promise<ChatMessage[]> {
+    const result = await this.store().collection(COLLECTIONS.threads).doc(threadId).collection('messages').orderBy('createdAt').get();
+    return result.docs.map(d => ({ ...d.data(), id: d.id }) as ChatMessage);
+  }
+  async saveMessage(threadId: string, message: ChatMessage) {
+    await this.store().collection(COLLECTIONS.threads).doc(threadId).collection('messages').doc(message.id).set(message);
+  }
+  async getPublishedArticles(siteId: string) {
+    const projects = await this.getProjectsOnSite(siteId);
+    return projects.filter(isPublished).map(p => ({
+      id: p.publishedArticleId || p.id, projectId: p.id, siteId: p.siteId,
+      title: p.content.title, description: p.content.description, content: p.content,
+      createdAt: p.createdAt, publishedAt: (p as any).publishedAt || p.updatedAt,
+    }));
+  }
+  async getPublishedArticleById(id: string) { return this.read<any>(COLLECTIONS.articles, id); }
+  async savePublishedArticle(article: any) { await this.store().collection(COLLECTIONS.articles).doc(article.id).set(article); }
+  async deletePublishedArticle(id: string) { await this.store().collection(COLLECTIONS.articles).doc(id).delete(); }
+}
+
+export const db = new FirestoreDatabase();

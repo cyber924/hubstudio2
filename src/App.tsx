@@ -165,14 +165,17 @@ type ViewType = 'magazine' | 'studio' | 'agent' | 'webzine' | 'projects' | 'blog
 
 export default function App() {
   // Navigation & Core States
-  const [currentView, setCurrentView] = useState<ViewType>('magazine');
+  const [currentView, setCurrentView] = useState<ViewType>(window.location.pathname.startsWith('/blog/') ? 'blog-view' : ['/webzine', '/blog'].includes(window.location.pathname) ? 'webzine' : 'magazine');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [is404Error, setIs404Error] = useState(false);
   const [currentUser, setCurrentUser] = useState<{ uid: string; email: string | null; name: string } | null>(null);
   const [config, setConfig] = useState<{ configured: boolean; siteName: string; siteId: string } | null>(null);
 
   // New Webzine States
-  const [publishedWebzineArticles, setPublishedWebzineArticles] = useState<BlogProject[]>([]);
+  const [publishedWebzineArticles, setPublishedWebzineArticles] = useState<BlogProject[]>((window as any).__PUBLIC_PROJECTS__ || []);
+  const [webzineError, setWebzineError] = useState<string | null>(null);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [projectsLoading, setProjectsLoading] = useState(false);
   const [webzineLoading, setWebzineLoading] = useState(false);
 
   // Authentication Modal States
@@ -189,7 +192,8 @@ export default function App() {
   const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('all');
-  const [publicArticles, setPublicArticles] = useState<any[]>([]);
+  const [publicArticles, setPublicArticles] = useState<any[]>(() => ((window as any).__PUBLIC_PROJECTS__ || []).map((project: any) => ({ ...project, id: project.publishedArticleId || project.id, projectId: project.id, publishedAt: project.publishedAt || project.updatedAt })));
+  const [publicArticlesError, setPublicArticlesError] = useState<string | null>(null);
   const [homePage, setHomePage] = useState(1);
   const [studioPage, setStudioPage] = useState(1);
 
@@ -217,7 +221,7 @@ export default function App() {
   const [voiceTranscript, setVoiceTranscript] = useState('');
 
   // Reader mode state
-  const [readingArticle, setReadingArticle] = useState<any | null>(null);
+  const [readingArticle, setReadingArticle] = useState<any | null>(() => { const project = (window as any).__PRE_RENDERED_PROJECT__; return project ? { ...project, id: project.publishedArticleId || project.id, projectId: project.id, publishedAt: project.publishedAt || project.updatedAt } : null; });
 
   // Projects list
   const [projectsList, setProjectsList] = useState<BlogProject[]>([]);
@@ -367,12 +371,13 @@ export default function App() {
   // Load published webzine articles list
   const loadPublishedWebzineArticles = async () => {
     setWebzineLoading(true);
+    setWebzineError(null);
     try {
-      const res = await fetch('/api/projects?status=published');
+      const res = await checkedFetch('/api/projects?status=published');
       const data = await res.json();
       setPublishedWebzineArticles(data.items || []);
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      setWebzineError(e.message || '웹진을 불러오지 못했습니다.');
     } finally {
       setWebzineLoading(false);
     }
@@ -398,7 +403,9 @@ export default function App() {
     const viewParam = params.get('view');
     const articleIdParam = params.get('articleId');
 
-    if (pathname.startsWith('/blog/')) {
+    if (['/webzine', '/blog'].includes(pathname)) {
+      setCurrentView('webzine');
+    } else if (pathname.startsWith('/blog/')) {
       const parts = pathname.split('/');
       const postId = parts[parts.length - 1];
 
@@ -419,10 +426,10 @@ export default function App() {
         setCurrentView('blog-view');
       } else {
         setWebzineLoading(true);
-        fetch(`/api/projects/${postId}`)
+        checkedFetch(`/api/blog/public/${postId}`)
           .then(res => res.ok ? res.json() : null)
           .then(proj => {
-            if (proj && proj.status === 'published') {
+            if (proj && proj.content) {
               const articleSnapshot = {
                 id: proj.publishedArticleId || proj.id,
                 siteId: proj.siteId,
@@ -449,7 +456,7 @@ export default function App() {
       }
     } else if (viewParam === 'webzine' && articleIdParam) {
       setWebzineLoading(true);
-      fetch(`/api/projects/${articleIdParam}`)
+      checkedFetch(`/api/blog/public/${articleIdParam}`)
         .then(res => res.ok ? res.json() : null)
         .then(proj => {
           if (proj) {
@@ -481,8 +488,8 @@ export default function App() {
   // Synchronize document head metadata and browser URL pathname dynamically (for Google / Naver SEO)
   useEffect(() => {
     if (currentView === 'blog-view' && readingArticle) {
-      const artId = readingArticle.projectId || readingArticle.id;
-      const targetPath = `/blog/${artId}`;
+      const artId = readingArticle.id || readingArticle.projectId;
+      const targetPath = `/blog/${encodeURIComponent(artId)}`;
       if (window.location.pathname !== targetPath) {
         window.history.pushState({}, '', targetPath);
       }
@@ -501,16 +508,17 @@ export default function App() {
       }
       canonicalEl.setAttribute('href', window.location.origin + targetPath);
     } else if (currentView === 'webzine') {
+      window.history.replaceState({}, '', '/webzine');
+      document.querySelector('link[rel="canonical"]')?.setAttribute('href', window.location.origin + '/webzine');
       if (window.location.pathname.startsWith('/blog/')) {
-        window.history.pushState({}, '', '/');
+        window.history.pushState({}, '', '/webzine');
       }
       document.title = "공식 웹진 아카이브 - Hub Studio 2";
       const descEl = document.querySelector('meta[name="description"]');
       if (descEl) descEl.setAttribute('content', "심사를 거쳐 최고 랭킹 점수를 획득하고 공식 발간된 슬로우 라이프스타일 저널 목록입니다.");
-    } else {
-      if (window.location.pathname.startsWith('/blog/')) {
-        window.history.pushState({}, '', '/');
-      }
+    } else if (currentView !== 'blog-view') {
+      window.history.replaceState({}, '', currentView === 'magazine' ? '/' : `/?view=${currentView}`);
+      document.querySelector('link[rel="canonical"]')?.setAttribute('href', window.location.origin + '/');
       document.title = "Hub Studio 2 (허브스튜디오2) - 감성 라이프스타일 비주얼 매거진";
       const descEl = document.querySelector('meta[name="description"]');
       if (descEl) descEl.setAttribute('content', "공통 이미지 자산을 감성적 가치로 큐레이션하여 깊이 있는 여행·생활 콘텐츠를 발행하는 라이프스타일 비주얼 매거진 서비스입니다.");
@@ -546,16 +554,24 @@ export default function App() {
     return () => clearInterval(intervalId);
   }, [activeJob]);
 
-  // Authenticated Fetch Proxy Helper
-  const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
-    const headers = new Headers(options.headers || {});
-    if (currentUser && currentUser.uid) {
-      headers.set('Authorization', `Bearer ${currentUser.uid}`);
-    } else {
-      // Guest fallback to let them view
-      headers.set('Authorization', 'Bearer guest');
+  const checkedFetch = async (url: string, options: RequestInit = {}) => {
+    const response = await fetch(url, options);
+    if (!response.headers.get('content-type')?.includes('application/json')) {
+      throw new Error('서버 API 연결이 올바르지 않습니다. 잠시 후 다시 시도하세요.');
     }
-    return fetch(url, { ...options, headers });
+    if (!response.ok) {
+      const data = await response.clone().json();
+      throw new Error(data.error?.message || `요청 실패 (${response.status})`);
+    }
+    return response;
+  };
+
+  const fetchWithAuth = async (url: string, options: RequestInit = {}) => {
+    const user = clientAuth.currentUser;
+    if (!user) throw new Error('로그인이 필요합니다.');
+    const headers = new Headers(options.headers || {});
+    headers.set('Authorization', `Bearer ${await user.getIdToken()}`);
+    return checkedFetch(url, { ...options, headers });
   };
 
   // Loading functions
@@ -675,26 +691,32 @@ export default function App() {
   };
 
   const loadPublicArticles = async () => {
+    setPublicArticlesError(null);
     try {
-      const res = await fetch('/api/blog/public');
+      const res = await checkedFetch('/api/blog/public');
       const data = await res.json();
       setPublicArticles(data.items || []);
-    } catch (e) {
-      console.error(e);
+    } catch (error: any) {
+      setPublicArticlesError(error.message || '공개 글 조회에 실패했습니다.');
     }
   };
 
   const loadProjects = async () => {
+    setProjectsError(null);
+    if (!clientAuth.currentUser) { setProjectsList([]); setProjectsLoading(false); return; }
+    setProjectsLoading(true);
+    const uid = clientAuth.currentUser.uid;
     try {
       const res = await fetchWithAuth('/api/projects');
       const data = await res.json();
-      setProjectsList(data.items || []);
-    } catch (e) {
-      console.error(e);
-    }
+      if (clientAuth.currentUser?.uid === uid) setProjectsList(data.items || []);
+    } catch (error: any) {
+      if (clientAuth.currentUser?.uid === uid) setProjectsError(error.message || '보관함 조회에 실패했습니다.');
+    } finally { setProjectsLoading(false); }
   };
 
   const loadThreads = async () => {
+    if (!clientAuth.currentUser) { setThreads([]); return; }
     try {
       const res = await fetchWithAuth('/api/agent/threads');
       const data = await res.json();
@@ -1734,7 +1756,9 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
                   <p className="text-neutral-500 text-sm mt-2">허브스튜디오2에서 공통 이미지를 활용해 창조하고 다듬어 낸 독창적인 에세이 아카이브입니다.</p>
                 </div>
 
-                {publicArticles.length === 0 ? (
+                {publicArticlesError ? (
+                  <div role="alert" className="bg-white border rounded-2xl p-8"><p>{publicArticlesError}</p><button className="mt-4 underline" onClick={loadPublicArticles}>다시 시도</button></div>
+                ) : publicArticles.length === 0 ? (
                   <div className="bg-white border border-neutral-200/50 rounded-2xl p-12 text-center max-w-lg mx-auto">
                     <BookOpenFallback />
                     <h3 className="font-serif font-bold text-lg text-neutral-800 mt-4">아직 발행된 글이 없습니다</h3>
@@ -2509,7 +2533,11 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
               <p className="text-neutral-400 text-xs mt-1">내가 생성, 교정, 검수 중이거나 공식 발행한 소유 매거진 프로젝트 목록입니다.</p>
             </div>
 
-            {projectsList.length === 0 ? (
+            {!currentUser ? (
+              <div className="bg-white border rounded-2xl p-8 text-center"><p>로그인하면 내 보관함을 확인할 수 있습니다.</p><button className="mt-4 underline" onClick={() => setAuthModalOpen(true)}>로그인</button></div>
+            ) : projectsLoading ? <p className="py-12 text-center">보관함을 불러오는 중...</p> : projectsError ? (
+              <div role="alert" className="bg-white border rounded-2xl p-8"><p>{projectsError}</p><button className="mt-4 underline" onClick={loadProjects}>다시 시도</button></div>
+            ) : projectsList.length === 0 ? (
               <div className="bg-white border border-neutral-200/50 rounded-3xl p-16 text-center max-w-lg mx-auto">
                 <BookOpenFallback />
                 <h3 className="font-serif font-bold text-lg text-neutral-800 mt-4">보관된 프로젝트가 없습니다</h3>
@@ -2595,7 +2623,7 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
                 <p className="text-neutral-400 text-xs mt-1">심사를 거쳐 최고 랭킹 점수를 획득하고 공식 발간된 슬로우 라이프스타일 저널 목록입니다.</p>
               </div>
               <div className="bg-neutral-100 px-3 py-1.5 rounded-lg border border-neutral-200 text-xs font-mono text-neutral-500">
-                TOTAL: {publishedWebzineArticles.length} 발행물
+                {webzineError ? "조회 실패" : `TOTAL: ${publishedWebzineArticles.length} 발행물`}
               </div>
             </div>
 
@@ -2604,6 +2632,8 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
                 <div className="animate-spin w-8 h-8 border-4 border-[#B23B1E] border-t-transparent rounded-full mx-auto mb-4"></div>
                 <p className="text-neutral-400 text-sm font-mono">공식 발행 데이터베이스 동기화 중...</p>
               </div>
+            ) : webzineError ? (
+              <div role="alert" className="bg-white border rounded-2xl p-8"><p>{webzineError}</p><button className="mt-4 underline" onClick={loadPublishedWebzineArticles}>다시 시도</button></div>
             ) : publishedWebzineArticles.length === 0 ? (
               <div className="bg-white border border-neutral-200/50 rounded-3xl p-16 text-center max-w-lg mx-auto">
                 <BookOpenFallback />
@@ -2645,7 +2675,7 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
                             PUBLISHED · {new Date(proj.updatedAt).toLocaleDateString()}
                           </span>
                           <h3 className="font-serif font-extrabold text-lg text-neutral-900 mt-1.5 line-clamp-2 leading-snug">
-                            {proj.content.title || proj.title}
+                            <a href={`/blog/${encodeURIComponent(proj.publishedArticleId || proj.id)}`}>{proj.content.title || proj.title}</a>
                           </h3>
                           <p className="text-neutral-500 text-xs mt-2 line-clamp-3 leading-relaxed">
                             {proj.content.description}
