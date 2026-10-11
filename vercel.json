@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/index.ts": {
+      "maxDuration": 300,
+      "includeFiles": "{dist/**,public/**,firestore_images_all.json,server/generated_seeds.json}"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/index?__route=/api/:path*" },
+    { "source": "/", "destination": "/api/index?__route=/" },
+    { "source": "/webzine", "destination": "/api/index?__route=/webzine" },
+    { "source": "/blog", "destination": "/api/index?__route=/blog" },
+    { "source": "/blog/:id", "destination": "/api/index?__route=/blog/:id" },
+    { "source": "/sitemap.xml", "destination": "/api/index?__route=/sitemap.xml" },
+    { "source": "/robots.txt", "destination": "/api/index?__route=/robots.txt" }
+  ]
+}
