@@ -854,7 +854,7 @@ export default function App() {
         showToast('기획안 추천 생성에 실패했습니다.', 'error');
       }
     } catch (err) {
-      showToast('네트워크 오류가 발생했습니다.', 'error');
+      showToast(err instanceof Error ? err.message : '네트워크 오류가 발생했습니다.', 'error');
     } finally {
       setIsPlanRecommending(false);
     }
@@ -933,7 +933,7 @@ export default function App() {
         showToast('글 원고 생성에 실패했습니다.', 'error');
       }
     } catch (err) {
-      showToast('네트워크 통신 중 에러 발생', 'error');
+      showToast(err instanceof Error ? err.message : '네트워크 통신 중 에러 발생', 'error');
     } finally {
       setStudioLoading(false);
     }
@@ -963,7 +963,7 @@ export default function App() {
         showToast('초안 저장을 완료하지 못했습니다.', 'error');
       }
     } catch (err) {
-      showToast('네트워크 오류 발생', 'error');
+      showToast(err instanceof Error ? err.message : '네트워크 오류 발생', 'error');
     } finally {
       setStudioLoading(false);
     }
@@ -990,7 +990,7 @@ export default function App() {
         showToast('검수 분석 처리 오류', 'error');
       }
     } catch (err) {
-      showToast('네트워크 에러 발생', 'error');
+      showToast(err instanceof Error ? err.message : '네트워크 에러 발생', 'error');
     } finally {
       setStudioLoading(false);
     }
@@ -1017,7 +1017,7 @@ export default function App() {
         showToast('이미지 자동 최적화 교체에 실패했습니다.', 'error');
       }
     } catch (err) {
-      showToast('네트워크 통신 에러', 'error');
+      showToast(err instanceof Error ? err.message : '네트워크 통신 에러', 'error');
     } finally {
       setStudioLoading(false);
     }
@@ -1047,7 +1047,7 @@ export default function App() {
         showToast('공개 발행 과정에서 오류 발생', 'error');
       }
     } catch (err) {
-      showToast('발행 처리 네트워크 실패', 'error');
+      showToast(err instanceof Error ? err.message : '발행 처리 네트워크 실패', 'error');
     } finally {
       setStudioLoading(false);
     }
@@ -1069,7 +1069,7 @@ export default function App() {
         showToast('프로젝트 삭제 실패', 'error');
       }
     } catch (e) {
-      showToast('네트워크 오류', 'error');
+      showToast(e instanceof Error ? e.message : '네트워크 오류', 'error');
     }
   };
 
@@ -1132,7 +1132,7 @@ export default function App() {
         setActiveJob(null);
       }
     } catch (e) {
-      showToast('네트워크 통신 오류', 'error');
+      showToast(e instanceof Error ? e.message : '네트워크 통신 오류', 'error');
       setActiveJob(null);
     }
   };

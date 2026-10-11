@@ -59,6 +59,8 @@ app.get('/api/config-status', async (req: Request, res: Response) => {
   const isGeminiConfigured = !!process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'YOUR_GEMINI_API_KEY';
   res.json({
     configured: isGeminiConfigured,
+    serverStorageCredentialsPresent: hasAdminCredentials(),
+    geminiModel: process.env.GEMINI_TEXT_MODEL || 'gemini-3.8-flash',
     siteId,
     siteName,
     imageHubReachable: true,
