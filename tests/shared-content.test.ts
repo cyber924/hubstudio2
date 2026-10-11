@@ -16,6 +16,12 @@ test('other studios and records without a studio marker are excluded', () => {
   assert.equal(sharedProject(doc('hub4')), null);
   assert.equal(sharedProject(doc('')), null);
 });
+test('Hub1-compatible contentJson renders the full published body and original images',()=>{
+ const d:any=doc('hub2');delete d.fields.sections;delete d.fields.summary;
+ d.fields.contentJson={stringValue:JSON.stringify({title:'저장한 제목',intro:'저장한 소개',sections:[{heading:'소제목',body:'새 본문',imageId:'original-image'}],closing:'마무리'})};
+ const p=sharedProject(d)!;
+ assert.equal(p.content.intro,'저장한 소개');assert.equal(p.content.sections[0].body,'새 본문');assert.equal(p.content.sections[0].imageId,'original-image');assert.equal(p.content.closing,'마무리');
+});
 
 test('archive permission denial returns only the verified owners public posts with an explicit notice', async () => {
   const { identityContext, sharedOwnedProjects } = await import('../server/shared-content.js');

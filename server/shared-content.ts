@@ -18,7 +18,8 @@ export function sharedProject(doc: any): BlogProject | null {
   const marker = p.sourceSite || p.siteId || p.themePersona || (p.recordType === 'hub2Project' ? 'hub2' : '');
   if (marker !== 'hub2' || !p.ownerId || !p.title) return null;
   const id = doc.name.split('/').pop();
-  const raw = p.content || p;
+  let raw = p.content || p;
+  if (typeof p.contentJson === 'string') { try { raw = JSON.parse(p.contentJson); } catch { return null; } }
   const sections = (raw.sections || []).map((s: any, i: number) => ({ id: s.id || `section_${i+1}`, heading: s.heading || s.title || '', body: s.body || s.content || '', imageId: s.imageId, caption: s.caption || s.imageCaption, alt: s.alt || s.imageCaption || s.heading || s.title || '' }));
   return { schemaVersion: 1, id, siteId: 'hub2', ownerId: p.ownerId, title: p.title, keyword: p.keyword || '', tone: p.tone || '', audience: p.audience || '', status: p.status, visibility: p.visibility || 'private', selectedImageIds: p.selectedImageIds || sections.map((s:any)=>s.imageId).filter(Boolean), content: { title: raw.title || p.title, description: raw.description || raw.metaDescription || raw.summary || '', intro: raw.intro || raw.summary || '', sections, closing: raw.closing || '', faq: raw.faq || [], tags: raw.tags || raw.seoTags || [] }, createdAt: p.createdAt, updatedAt: p.updatedAt || p.createdAt, revision: p.revision || 1, ...(p.status === 'published' ? { publishedArticleId: p.publishedArticleId || id, publishedAt: p.publishedAt || p.updatedAt || p.createdAt } : {}) } as BlogProject;
 }
