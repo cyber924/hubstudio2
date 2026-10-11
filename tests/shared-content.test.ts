@@ -16,3 +16,26 @@ test('other studios and records without a studio marker are excluded', () => {
   assert.equal(sharedProject(doc('hub4')), null);
   assert.equal(sharedProject(doc('')), null);
 });
+
+test('archive permission denial returns only the verified owners public posts with an explicit notice', async () => {
+  const { identityContext, sharedOwnedProjects } = await import('../server/shared-content.js');
+  const originalFetch = globalThis.fetch;
+  const mine = doc('hub2');
+  const other = structuredClone(mine);
+  other.name = other.name.replace('blog_original', 'other_blog');
+  other.fields.ownerId.stringValue = 'another-owner';
+  globalThis.fetch = async (_url, options) => {
+    const q = JSON.parse(String(options?.body)).structuredQuery;
+    if (q.where.fieldFilter.field.fieldPath === 'ownerId') return new Response('{}', { status: 403 });
+    return Response.json([{ document: mine }, { document: other }]);
+  };
+  try {
+    const context = { uid: 'original-owner', token: 'verified-token', archiveWarning: undefined as string | undefined };
+    await identityContext.run(context, async () => {
+      const list = await sharedOwnedProjects(context.uid);
+      assert.deepEqual(list.map(p=>p.id), ['blog_original']);
+      assert.ok(context.archiveWarning?.includes('비공개 초안'));
+      assert.deepEqual(await sharedOwnedProjects('another-owner'), []);
+    });
+  } finally { globalThis.fetch = originalFetch; }
+});

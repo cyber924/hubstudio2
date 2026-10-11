@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { BlogProject } from './db.js';
 import { projectId } from './firebase-admin.js';
 
-export const identityContext = new AsyncLocalStorage<{ uid: string; token: string }>();
+export const identityContext = new AsyncLocalStorage<{ uid: string; token: string; archiveWarning?: string }>();
 const apiKey = process.env.FIREBASE_WEB_API_KEY || 'AIzaSyDEpFAsf1fI65xXklKYsukAWFYw5bzaHyc';
 const endpoint = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`;
 export function decodeValue(value: any): any {
@@ -47,8 +47,16 @@ export async function sharedPublicProjects() {
 export async function sharedOwnedProjects(ownerId: string) {
   const identity = identityContext.getStore();
   if (!identity || identity.uid !== ownerId) return [];
-  const records = await query('publishedContents', 'ownerId', ownerId, identity.token);
-  return records;
+  try {
+    return await query('publishedContents', 'ownerId', ownerId, identity.token);
+  } catch (error: any) {
+    if (error.status !== 403) throw error;
+    // Public documents remain readable under the existing shared DB rules.
+    // Scope these records to the verified Firebase UID, never a client-supplied owner.
+    const records = (await sharedPublicProjects()).filter(p => p.ownerId === identity.uid);
+    identity.archiveWarning = '내가 발행한 공개 글을 불러왔습니다. 비공개 초안은 현재 읽기 권한이 없어 표시되지 않습니다.';
+    return records;
+  }
 }
 export async function verifyIdentity(token: string) {
   const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken: token }), signal: AbortSignal.timeout(10000) });

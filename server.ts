@@ -318,7 +318,7 @@ app.get('/api/projects', async (req: Request, res: Response) => {
     list = list.filter(p => p.status === status);
   }
 
-  res.json({ items: list });
+  res.json({ items: list, warning: identityContext.getStore()?.archiveWarning || null });
 });
 
 // 10. API - Get Project Details

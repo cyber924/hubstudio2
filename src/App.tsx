@@ -174,6 +174,7 @@ export default function App() {
   // New Webzine States
   const [publishedWebzineArticles, setPublishedWebzineArticles] = useState<BlogProject[]>((window as any).__PUBLIC_PROJECTS__ || []);
   const [webzineError, setWebzineError] = useState<string | null>(null);
+  const [projectsNotice, setProjectsNotice] = useState<string | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   const [projectsLoading, setProjectsLoading] = useState(false);
   const [webzineLoading, setWebzineLoading] = useState(false);
@@ -703,13 +704,17 @@ export default function App() {
 
   const loadProjects = async () => {
     setProjectsError(null);
+    setProjectsNotice(null);
     if (!clientAuth.currentUser) { setProjectsList([]); setProjectsLoading(false); return; }
     setProjectsLoading(true);
     const uid = clientAuth.currentUser.uid;
     try {
       const res = await fetchWithAuth('/api/projects');
       const data = await res.json();
-      if (clientAuth.currentUser?.uid === uid) setProjectsList(data.items || []);
+      if (clientAuth.currentUser?.uid === uid) {
+        setProjectsList(data.items || []);
+        setProjectsNotice(data.warning || null);
+      }
     } catch (error: any) {
       if (clientAuth.currentUser?.uid === uid) setProjectsError(error.message || '보관함 조회에 실패했습니다.');
     } finally { setProjectsLoading(false); }
@@ -2533,6 +2538,7 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
               <p className="text-neutral-400 text-xs mt-1">내가 생성, 교정, 검수 중이거나 공식 발행한 소유 매거진 프로젝트 목록입니다.</p>
             </div>
 
+            {currentUser && projectsNotice && <p role="status" className="mb-5 rounded-xl border border-neutral-200 bg-white px-5 py-4 text-sm text-neutral-600">{projectsNotice}</p>}
             {!currentUser ? (
               <div className="bg-white border rounded-2xl p-8 text-center"><p>로그인하면 내 보관함을 확인할 수 있습니다.</p><button className="mt-4 underline" onClick={() => setAuthModalOpen(true)}>로그인</button></div>
             ) : projectsLoading ? <p className="py-12 text-center">보관함을 불러오는 중...</p> : projectsError ? (
@@ -2540,7 +2546,7 @@ ${content.faq.map(f => `Q: ${f.question}\nA: ${f.answer}`).join('\n')}`;
             ) : projectsList.length === 0 ? (
               <div className="bg-white border border-neutral-200/50 rounded-3xl p-16 text-center max-w-lg mx-auto">
                 <BookOpenFallback />
-                <h3 className="font-serif font-bold text-lg text-neutral-800 mt-4">보관된 프로젝트가 없습니다</h3>
+                <h3 className="font-serif font-bold text-lg text-neutral-800 mt-4">{projectsNotice ? '표시할 수 있는 공개 글이 없습니다' : '보관된 프로젝트가 없습니다'}</h3>
                 <p className="text-neutral-400 text-xs mt-1">제작 작업실에서 고품질 슬로우 트래블 매거진을 만들고 첫 여정을 기록해 보세요!</p>
                 <button 
                   onClick={() => setCurrentView('studio')}
