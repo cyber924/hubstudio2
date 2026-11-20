@@ -7,6 +7,7 @@ import { identityContext, verifyIdentity, sharedPublicImage, invalidateSharedPub
 import { escapeHtml, scriptJson, stripMetadata, articleBody } from './server/seo.js';
 import { db, HubImage, BlogProject, BlogContent, AgentJob, ChatMessage, AgentThread, ReviewResult, BlogSection, isPublished } from './server/db.js';
 import { recommendPlan, generateBlog, reviewBlog, rewriteBlog, interpretAgentRequest } from './server/gemini.js';
+import { isGeminiError } from './server/gemini-errors.js';
 
 dotenv.config();
 
@@ -148,7 +149,7 @@ app.post('/api/editorial-plan', async (req: Request, res: Response) => {
     const plan = await recommendPlan(topic, selectedImages);
     res.json(plan);
   } catch (err: any) {
-    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Error occurred' } });
+    res.status(isGeminiError(err) ? err.status : 500).json({ error: { code: isGeminiError(err) ? err.code : 'SERVER_ERROR', message: isGeminiError(err) ? err.message : 'AI 요청 처리에 실패했습니다.' } });
   }
 });
 
@@ -191,7 +192,7 @@ app.post('/api/blog/generate', async (req: Request, res: Response) => {
 
     res.json(project);
   } catch (err: any) {
-    res.status(err.status || 500).json({ error: { code: 'SERVER_ERROR', message: err.message || 'Generation failed' } });
+    res.status(isGeminiError(err) ? err.status : 500).json({ error: { code: isGeminiError(err) ? err.code : 'SERVER_ERROR', message: isGeminiError(err) ? err.message : 'AI 요청 처리에 실패했습니다.' } });
   }
 });
 
@@ -384,7 +385,16 @@ app.post('/api/agent/interpret', async (req: Request, res: Response) => {
   const messages = Array.isArray(req.body.messages) ? req.body.messages.slice(-30) : [];
   const images = Array.isArray(req.body.images) ? req.body.images.slice(0,200) : [];
   if (!messages.length) return res.status(400).json({error:{message:'메시지가 필요합니다.'}});
-  res.json(await interpretAgentRequest(messages, images, project || null));
+  try {
+    res.json(await interpretAgentRequest(messages, images, project || null));
+  } catch (err: any) {
+    res.status(isGeminiError(err) ? err.status : 500).json({
+      error: {
+        code: isGeminiError(err) ? err.code : 'SERVER_ERROR',
+        message: isGeminiError(err) ? err.message : '에이전트 요청 처리에 실패했습니다.',
+      },
+    });
+  }
 });
 
 const SITE_URL = (process.env.SITE_URL || process.env.APP_URL || 'https://hubstudio2.vercel.app').replace(/\/$/, '');
