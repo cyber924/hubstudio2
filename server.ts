@@ -462,7 +462,7 @@ app.get('/robots.txt', (_req: Request, res: Response) => {
 
 app.get('/sitemap.xml', async (_req: Request, res: Response) => {
   const projects = (await db.getProjectsOnSite(siteId)).filter(isPublished);
-  const pages = ['/', '/webzine', '/blog'].map(path => `<url><loc>${escapeHtml(SITE_URL + path)}</loc></url>`);
+  const pages = ['/', '/webzine'].map(path => `<url><loc>${escapeHtml(SITE_URL + path)}</loc></url>`);
   for (const project of projects) {
     pages.push(`<url><loc>${escapeHtml(SITE_URL + articlePath(project))}</loc><lastmod>${escapeHtml(project.updatedAt)}</lastmod></url>`);
   }
@@ -474,7 +474,10 @@ app.get('/blog/:id', async (req: Request, res: Response) => {
   return getPopulatedHtml(req, res, project && project.siteId === siteId && isPublished(project) ? 200 : 404, project && project.siteId === siteId && isPublished(project) ? project : null);
 });
 
-for (const route of ['/', '/webzine', '/blog']) app.get(route, async (req: Request, res: Response) => {
+// Keep the legacy list URL as a permanent redirect; individual /blog/:id pages remain indexed.
+app.get('/blog', (_req: Request, res: Response) => res.redirect(308, '/webzine'));
+
+for (const route of ['/', '/webzine']) app.get(route, async (req: Request, res: Response) => {
   const projects = (await db.getProjectsOnSite(siteId)).filter(isPublished);
   const title = req.path === '/' ? `${siteName} | 라이프스타일 비주얼 매거진` : `공식 웹진 아카이브 | ${siteName}`;
   const description = '여행과 생활의 이야기를 이미지와 함께 전하는 라이프스타일 웹진입니다.';
