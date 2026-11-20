@@ -78,13 +78,23 @@ test('emulator ID tokens scope the archive to their verified UID', async () => {
 });
 
 test('home and webzine initial HTML contain actual detail anchors', async () => {
-  for (const path of ['/', '/webzine', '/blog']) {
+  for (const path of ['/', '/webzine']) {
     const response = await request(path);
     assert.equal(response.status, 200);
     const html = await response.text();
     for (const project of fixtures) assert.ok(html.includes(`href="/blog/${project.publishedArticleId}"`));
     assert.equal((html.match(/rel="canonical"/g) || []).length, 1);
   }
+});
+
+test('legacy /blog listing permanently redirects to /webzine; articles remain separate', async () => {
+  const legacy = await request('/blog', { redirect: 'manual' });
+  assert.equal(legacy.status, 308);
+  assert.equal(legacy.headers.get('location'), '/webzine');
+  const archive = await request('/webzine');
+  assert.equal(archive.status, 200);
+  assert.ok((await archive.text()).includes('rel="canonical" href="https://hubstudio2.vercel.app/webzine"'));
+  assert.equal((await request('/blog/test_article_0')).status, 200);
 });
 
 test('article contains escaped body, unique metadata, safe bootstrap and BlogPosting', async () => {
@@ -131,7 +141,10 @@ test('sitemap and robots use HTTPS and the same six published identities', async
   assert.equal(response.status, 200);
   assert.match(response.headers.get('content-type')!, /xml/);
   const xml = await response.text();
-  assert.equal((xml.match(/<loc>/g) || []).length, 9);
+  assert.equal((xml.match(/<loc>/g) || []).length, 8);
+  assert.ok(xml.includes('<loc>https://hubstudio2.vercel.app/webzine</loc>'));
+  assert.ok(!xml.includes('<loc>https://hubstudio2.vercel.app/blog</loc>'));
+
   for (const project of fixtures) assert.ok(xml.includes(`https://hubstudio2.vercel.app/blog/${project.publishedArticleId}`));
   const robots = await (await request('/robots.txt')).text();
   assert.ok(robots.includes('Sitemap: https://hubstudio2.vercel.app/sitemap.xml'));
