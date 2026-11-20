@@ -1,10 +1,11 @@
 import { GoogleGenAI, Type } from '@google/genai';
+import { geminiError, normalizeGeminiError } from './gemini-errors.js';
 import { BlogContent, BlogProject, HubImage, ReviewResult, BlogSection, ChatMessage } from './db.js';
 
 const getAiClient = () => {
   const apiKey = process.env.GEMINI_API_KEY || '';
   if (!apiKey || apiKey === 'YOUR_GEMINI_API_KEY' || apiKey === 'MY_GEMINI_API_KEY') {
-    throw Object.assign(new Error('Gemini 서버 키가 설정되지 않았습니다.'), { status: 503 });
+    throw geminiError('GEMINI_API_KEY_MISSING', 'Gemini 서버 키가 설정되지 않았습니다. Vercel 환경변수 GEMINI_API_KEY를 확인해 주세요.');
   }
   return new GoogleGenAI({
     apiKey: apiKey,
@@ -21,22 +22,28 @@ const TEXT_MODEL = process.env.GEMINI_TEXT_MODEL || 'gemini-3.8-flash';
 // Helpler to safely call Gemini with JSON schema output
 async function generateJson<T>(prompt: string, schema: any, systemInstruction?: string): Promise<T> {
   const ai = getAiClient();
-  const response = await ai.models.generateContent({
-    model: TEXT_MODEL,
-    contents: prompt,
-    config: {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema: schema,
-      temperature: 0.7,
-    },
-  });
+  try {
+    const response = await ai.models.generateContent({
+      model: TEXT_MODEL,
+      contents: prompt,
+      config: {
+        systemInstruction,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+        temperature: 0.7,
+      },
+    });
 
-  const text = response.text;
-  if (!text) {
-    throw new Error('Empty response from model');
+    const text = response.text;
+    if (!text) {
+      throw geminiError('GEMINI_EMPTY_RESPONSE', 'Gemini에서 빈 응답을 받았습니다. 다시 시도해 주세요.', 502);
+    }
+    return JSON.parse(text) as T;
+  } catch (error) {
+    const normalized = normalizeGeminiError(error);
+    console.error('Gemini request failed', { code: normalized.code, status: normalized.status });
+    throw normalized;
   }
-  return JSON.parse(text) as T;
 }
 
 export async function recommendPlan(topic: string, images: HubImage[]): Promise<{
